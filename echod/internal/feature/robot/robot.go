@@ -101,9 +101,9 @@ type Robot struct {
 	thermalGuard *thermal.Guard
 
 	// Protected by camMu.
-	camRelease func()
+	camRelease  func()
 	camUnlisten func()
-	camHeld    bool
+	camHeld     bool
 
 	// Protected by mu.
 	running         bool

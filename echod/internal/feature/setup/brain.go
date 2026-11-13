@@ -104,18 +104,21 @@ func brainSection(w http.ResponseWriter, token string) {
 // wake word.
 func saveBrain(r *http.Request) string {
 	v := func(k string) string { return strings.TrimSpace(r.PostFormValue(k)) }
+	cur := config.Get().Brain
 	b := config.Brain{
-		Mode:     config.BrainMode(v("mode")),
-		STT:      v("stt"),
-		TTS:      v("tts"),
-		Voice:    v("voice"),
-		Language: v("language"),
-		LLM:      strings.TrimRight(v("llm"), "/"),
-		Model:    v("model"),
-		Search:   strings.TrimRight(v("search"), "/"),
-		Reader:   strings.TrimRight(v("reader"), "/"),
-		News:     strings.TrimSpace(strings.ReplaceAll(r.PostFormValue("news"), "\r", "")),
-		Prompt:   strings.TrimSpace(r.PostFormValue("prompt")),
+		Mode:        config.BrainMode(v("mode")),
+		STT:         v("stt"),
+		TTS:         v("tts"),
+		Voice:       v("voice"),
+		Language:    v("language"),
+		LLM:         strings.TrimRight(v("llm"), "/"),
+		Model:       v("model"),
+		VLM:         cur.VLM,
+		VisionModel: cur.VisionModel,
+		Search:      strings.TrimRight(v("search"), "/"),
+		Reader:      strings.TrimRight(v("reader"), "/"),
+		News:        strings.TrimSpace(strings.ReplaceAll(r.PostFormValue("news"), "\r", "")),
+		Prompt:      strings.TrimSpace(r.PostFormValue("prompt")),
 	}
 	if b.Mode != config.BrainHomeAssistant && b.Mode != config.BrainDirect {
 		return "that is not a way of answering this device knows"

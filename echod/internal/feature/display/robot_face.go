@@ -124,14 +124,14 @@ func drawRobotFace(r *renderer, s scene) []customZone {
 }
 
 type robotGeom struct {
-	cxL, cxR, cy        float64
-	eyeR                float64
-	pupilX, pupilY      float64
-	mouthCX, mouthCY    float64
-	cheekLX, cheekRX    float64
-	cheekY, cheekR      float64
-	blinkFactor         float64 // 0 = wide open, 1 = closed blink
-	dirty               image.Rectangle
+	cxL, cxR, cy     float64
+	eyeR             float64
+	pupilX, pupilY   float64
+	mouthCX, mouthCY float64
+	cheekLX, cheekRX float64
+	cheekY, cheekR   float64
+	blinkFactor      float64 // 0 = wide open, 1 = closed blink
+	dirty            image.Rectangle
 }
 
 func computeRobotGeom(r *renderer, snap robot.Snapshot, now time.Time) robotGeom {
