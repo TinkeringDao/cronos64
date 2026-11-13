@@ -138,7 +138,7 @@ func EstimateAzimuth(ch0, ch1 []int16, sampleRate int, micSpacingMeters float64)
 		}
 	}
 
-	az := tau / maxTau
+	az := -tau / maxTau
 	if az < -1.0 {
 		az = -1.0
 	} else if az > 1.0 {

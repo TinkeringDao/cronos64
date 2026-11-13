@@ -4,8 +4,6 @@ import (
 	"math"
 	"math/rand"
 	"testing"
-
-	"github.com/HuskerMinion/techo5/echod/internal/lib/audio"
 )
 
 // synthesizeSpeechBand generates a deterministic pulse train composed of speech-band harmonics (300-3400 Hz)
@@ -49,6 +47,8 @@ func TestEstimateAzimuthSyntheticDelays(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 	noiseLevel := 260.0
 
+	// Negative shift = sound from Left (arrives at ch0/left first, ch1 delayed)
+	// Positive shift = sound from Right (arrives at ch1/right first, ch1 leading)
 	shifts := []int{-2, -1, 0, 1, 2}
 	azimuths := make([]float64, len(shifts))
 
@@ -58,14 +58,16 @@ func TestEstimateAzimuthSyntheticDelays(t *testing.T) {
 
 		baseOffset := 200
 		for j := 0; j < frameLen; j++ {
-			// ch0 reference
+			// ch0 (Left mic) reference
 			n0 := (rng.Float64()*2 - 1) * noiseLevel
 			v0 := float64(baseSignal[baseOffset+j]) + n0
 			ch0[j] = int16(math.Round(v0))
 
-			// ch1 shifted by shift: if shift is positive, ch1 receives the signal later (delayed)
+			// ch1 (Right mic):
+			// shift < 0: sound hits ch0 first, ch1 receives it delayed by |shift| -> baseSignal[baseOffset+j+shift]
+			// shift > 0: sound hits ch1 first, ch1 leads by shift -> baseSignal[baseOffset+j+shift]
 			n1 := (rng.Float64()*2 - 1) * noiseLevel
-			v1 := float64(baseSignal[baseOffset+j-shift]) + n1
+			v1 := float64(baseSignal[baseOffset+j+shift]) + n1
 			ch1[j] = int16(math.Round(v1))
 		}
 
@@ -79,10 +81,16 @@ func TestEstimateAzimuthSyntheticDelays(t *testing.T) {
 		if az < -1.0 || az > 1.0 {
 			t.Fatalf("shift %d: azimuth = %f, want in [-1.0, +1.0]", shift, az)
 		}
+		if shift < 0 && az >= 0 {
+			t.Fatalf("shift %d (left source): azimuth = %f, want < 0", shift, az)
+		}
+		if shift > 0 && az <= 0 {
+			t.Fatalf("shift %d (right source): azimuth = %f, want > 0", shift, az)
+		}
 		azimuths[i] = az
 	}
 
-	// Assert strict monotonicity: azimuth(-2) < azimuth(-1) < azimuth(0) < azimuth(+1) < azimuth(+2)
+	// Assert strict left-to-right monotonicity: azimuth(-2) < azimuth(-1) < azimuth(0) < azimuth(+1) < azimuth(+2)
 	for i := 1; i < len(azimuths); i++ {
 		if azimuths[i] <= azimuths[i-1] {
 			t.Fatalf("azimuth not monotonic: shift %d (%f) <= shift %d (%f)",
@@ -155,26 +163,18 @@ func TestEstimateAzimuthRejectsSilenceClippingAndIdenticalMono(t *testing.T) {
 	})
 }
 
-func encodeCronosRawFrame(ch0, ch1 []int16) []byte {
+func encodeRawFrame(ch0, ch1 []int16) []byte {
 	n := len(ch0)
-	// Channels = 4 (mic0, mic1, ref0, ref1), 3 bytes per channel
-	frameBytes := 4 * 3
+	frameBytes := Channels * Bits / 8
 	raw := make([]byte, n*frameBytes)
 	for i := 0; i < n; i++ {
 		off := i * frameBytes
-		// ch0 (mic0)
-		v0 := uint32(int32(ch0[i]) << 8)
-		raw[off] = byte(v0)
-		raw[off+1] = byte(v0 >> 8)
-		raw[off+2] = byte(v0 >> 16)
-
-		// ch1 (mic1)
-		v1 := uint32(int32(ch1[i]) << 8)
-		raw[off+3] = byte(v1)
-		raw[off+4] = byte(v1 >> 8)
-		raw[off+5] = byte(v1 >> 16)
-
-		// ref0, ref1 are 0
+		if Mics >= 1 {
+			putS24LE3(raw[off:], int32(ch0[i])<<8)
+		}
+		if Mics >= 2 {
+			putS24LE3(raw[off+3:], int32(ch1[i])<<8)
+		}
 	}
 	return raw
 }
@@ -190,34 +190,40 @@ func TestMicSourceAzimuthLazyDemand(t *testing.T) {
 	_ = az
 	_ = conf
 
-	// Prepare synthetic frame with shift = +2 (delayed on ch1)
+	// Prepare synthetic frame
 	const frameLen = FrameSamples
 	baseSignal := synthesizeSpeechBand(frameLen + 10)
 	ch0 := make([]int16, frameLen)
 	ch1 := make([]int16, frameLen)
 	for i := 0; i < frameLen; i++ {
 		ch0[i] = baseSignal[i+4]
-		ch1[i] = baseSignal[i+4-2] + int16((i%3)-1) // delayed by 2 + tiny decorrelation
+		// Sound arriving from the right (ch1 leading by +2 samples)
+		ch1[i] = baseSignal[i+4+2] + int16((i%3)-1)
 	}
 
-	raw := encodeCronosRawFrame(ch0, ch1)
+	raw := encodeRawFrame(ch0, ch1)
 
 	// Since Azimuth() was called above, wantAzimuth is set.
-	// broadcast will evaluate EstimateAzimuth and store the result.
+	// broadcast will evaluate EstimateAzimuth if Mics == 2.
 	s.broadcast(raw)
 
-	// Now Azimuth() should return ok=true with positive azimuth
 	az, conf, ok = s.Azimuth()
+	if Mics != 2 {
+		// Non-2-mic devices (Dot 7-mic, Spot/Donut 4-mic, Panel 1-mic) must leave Azimuth() inactive (ok == false)
+		if ok {
+			t.Fatalf("expected ok=false on %d-mic device (build tags), got ok=true", Mics)
+		}
+		return
+	}
+
+	// 2-mic Cronos device: azimuth must be active with positive azimuth for right-side sound arrival
 	if !ok {
-		t.Fatalf("expected ok=true after broadcast with pending wantAzimuth")
+		t.Fatalf("expected ok=true after broadcast with pending wantAzimuth on 2-mic device")
 	}
 	if conf < 0.6 {
 		t.Errorf("conf = %f, want > 0.6", conf)
 	}
 	if az <= 0 {
-		t.Errorf("azimuth = %f, want > 0 for +2 delay on ch1", az)
+		t.Errorf("azimuth = %f, want > 0 for right-side sound arrival (ch1 leading)", az)
 	}
-
-	// Verify audio loopback AEC is untouched
-	_ = audio.DecodeS24LE3
 }
