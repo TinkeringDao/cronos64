@@ -89,6 +89,9 @@ const (
 	skylightCompatible = "skylight,cal150"
 )
 
+// Cronos is whether this is the 2nd gen Echo Show 5.
+func Cronos() bool { return Board == boardCronos }
+
 // Checkers is whether this is the 1st gen Echo Show 5.
 func Checkers() bool { return Board == boardCheckers }
 

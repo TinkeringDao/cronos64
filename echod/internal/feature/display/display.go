@@ -670,7 +670,7 @@ func (d *Display) Name() string { return "screen" }
 // turnShown is whether the turn's picture is the page: nothing drawn before it in render.draw has the
 // screen. Only then does it need its fast frames.
 func turnShown(s scene) bool {
-	return s.eq != nil && !s.callPageUp() && !s.ring.any() && !s.setupAsking && !s.bt.Pairing &&
+	return s.eq != nil && s.custom.name == "" && !s.callPageUp() && !s.ring.any() && !s.setupAsking && !s.bt.Pairing &&
 		!s.showWifi && !s.showSheet && !s.showCamera && !s.showAlert && !s.showCalendar && !s.showRadar &&
 		!s.showWeather && !s.showDash && !s.showDeck
 }
@@ -2858,18 +2858,7 @@ func (d *Display) frame() (next time.Duration) {
 	d.mu.Lock()
 	quiet := d.quiet
 	d.mu.Unlock()
-	if quiet && (s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
-		// A screen command: the screen it asked for is the answer, not the words.
-		s.phase, s.heard, s.reply, s.failed = "idle", "", "", ""
-	}
-	if cueOn() {
-		s.cue, s.phase, s.heard, s.reply = cueFailed(s.phase, s.heard, s.reply, s.failed, captionsOn())
-	}
-	s.said = voice.Spoken(s.reply, now)
-	if equalizerOn() && (s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
-		s.eq = eqFor(s.phase, nightNow(now), now)
-		s.eq.wave = waveOn()
-	}
+	rawPhase, rawHeard, rawReply := d.applyTurnCue(&s, quiet, now)
 	// A stream this player is carrying is the room's when it is what is being heard: the page names it,
 	// and says what it is doing, though the audio never passes through this player's own stream. Both,
 	// not just playing: the page tests paused first, so a station left paused underneath would label
@@ -3053,6 +3042,7 @@ func (d *Display) frame() (next time.Duration) {
 	// has held for the configured wait, tracked by how long it has run continuously.
 	d.deckScene(&s, now)
 	d.customScene(&s, now)
+	d.finishCustomTurn(&s, rawPhase, rawHeard, rawReply, now)
 	// A call drawn over the page leaves the page as it was: the dashboard, the photos, the
 	// screensaver.
 	d.dashScene(&s, s.showSheet || ring.any() || s.callPageUp())
@@ -3210,14 +3200,45 @@ func (d *Display) frame() (next time.Duration) {
 		slog.Warn("presenting the frame failed", "err", err)
 	}
 	d.answerShots()
+	return d.frameNext(s, ring, call, now)
+}
+
+func (d *Display) applyTurnCue(s *scene, quiet bool, now time.Time) (rawPhase, rawHeard, rawReply string) {
+	if quiet && (s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
+		// A screen command: the screen it asked for is the answer, not the words.
+		s.phase, s.heard, s.reply, s.failed = "idle", "", "", ""
+	}
+	rawPhase, rawHeard, rawReply = s.phase, s.heard, s.reply
+	if cueOn() {
+		s.cue, s.phase, s.heard, s.reply = cueFailed(s.phase, s.heard, s.reply, s.failed, captionsOn())
+	}
+	s.said = voice.Spoken(s.reply, now)
+	if equalizerOn() && (s.phase == "listening" || s.phase == "thinking" || s.phase == "replying" || s.phase == "lingering") {
+		s.eq = eqFor(s.phase, nightNow(now), now)
+		s.eq.wave = waveOn()
+	}
+	return rawPhase, rawHeard, rawReply
+}
+
+func (d *Display) finishCustomTurn(s *scene, rawPhase, rawHeard, rawReply string, now time.Time) {
+	if customDuringTurn(s.custom.name) {
+		// Companion/turn custom screens retain live voice state without cue overlays corrupting dirty rects.
+		s.phase, s.cue, s.heard, s.reply = rawPhase, "", rawHeard, rawReply
+		if s.custom.name == "robot" {
+			syncRobotTurn(s.phase, now)
+		}
+	}
+}
+
+func (d *Display) frameNext(s scene, ring ringState, call phone.State, now time.Time) time.Duration {
 	if s.updateActive {
 		return 250 * time.Millisecond
 	}
-	if d.r.flipBusy(time.Now()) {
+	if d.r != nil && d.r.flipBusy(time.Now()) {
 		// A card is flipping: the night's flip clock, or the Flip clock style. Paced from one frame's
 		// start to the next's, as Rainbow is, so a frame that took a while does not also hold back
 		// the next one.
-		return max(flipFrame-time.Since(began), rainbowBreath)
+		return max(flipFrame-time.Since(now), rainbowBreath)
 	}
 	if s.showCamera && stillOnly(s.camera) {
 		return time.Until(time.Now().Truncate(idleFrame).Add(idleFrame)) // its picture arriving wakes the loop itself
@@ -3243,7 +3264,7 @@ func (d *Display) frame() (next time.Duration) {
 	if s.showWeather && s.sky != fxNone && !s.setupAsking {
 		return fxFrame
 	}
-	if d.r.artDrawn {
+	if d.r != nil && d.r.artDrawn {
 		return artFxFrame // rain or snow is falling over the weather art on the screen
 	}
 	if (s.slideshow != nil || s.slideshowScreensaver != nil) && home.Get().SlideshowTransitioning() {
@@ -3263,7 +3284,7 @@ func (d *Display) frame() (next time.Duration) {
 		return wait
 	}
 	if (s.phase == "idle" || s.phase == "lingering") && !s.showVolume {
-		if d.r.c64Drawn {
+		if d.r != nil && d.r.c64Drawn {
 			// The cursor blinks (skin_c64.go), on the same grid of Unix milliseconds its phase is read on.
 			return c64Blink - time.Duration(now.UnixMilli()%c64Blink.Milliseconds())*time.Millisecond
 		}

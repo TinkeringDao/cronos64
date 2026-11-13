@@ -71,6 +71,14 @@ type customScreen struct {
 	// on the canvas with nothing over it, only what changed (renderer.customKept): the canvas is then not
 	// cleared for the frame. A list that scrolls under a page that is slow to draw wants that.
 	keeps bool
+	// duringTurn keeps this custom screen visible and interactive through voice turns
+	// (listening, thinking, replying, lingering) instead of yielding to turn visualizers.
+	duringTurn bool
+}
+
+func customDuringTurn(id string) bool {
+	c, ok := customByID(id)
+	return ok && c.duringTurn
 }
 
 // customScreens are the screens registered, in their ranks' order.
@@ -226,7 +234,13 @@ func (d *Display) closeCustom() {
 func (d *Display) customShowing() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.customs.shown != "" && pageIdle(d.view.Phase)
+	if d.customs.shown == "" {
+		return false
+	}
+	if customDuringTurn(d.customs.shown) {
+		return true
+	}
+	return pageIdle(d.view.Phase)
 }
 
 // customScene fills in the custom screen, when one is up or is the idle screen and nothing that comes
@@ -252,7 +266,7 @@ func (d *Display) customScene(s *scene, now time.Time) {
 		name = idle
 	}
 	c, ok := customByID(name)
-	if !ok || s.phase != "idle" || over {
+	if !ok || (s.phase != "idle" && !c.duringTurn) || over {
 		name = ""
 	}
 	if asIdle && name != "" && name != d.customs.shown {
@@ -321,10 +335,22 @@ func customCache[T any](r *renderer, id string, mk func() *T) *T {
 	return v
 }
 
+// customNoOverlay reports whether no transient card, call, cue, setup prompt,
+// or modal overlay sits over the page.
+func customNoOverlay(s scene, ringing, calling bool) bool {
+	return !s.showVideo && !s.showVideoAsk && !s.showVolume && !ringing && !calling && !s.setupAsking &&
+		!s.showAnnouncement && !s.showReminder && !s.showNotification && s.popup == nil && !s.pin.open && !s.announceRecording &&
+		!s.updateActive && s.cue == ""
+}
+
 // customAlonePage is a frame of a custom screen with nothing drawn over it: no card, strip, cue or
 // pill, nor any page that takes its place.
 func customAlonePage(s scene) bool {
-	return customFrameKey(s, s.ring.any(), s.call.Phase != phone.Idle) != "" && !s.muted && s.linkDown == "" && s.camtest == nil && s.qrscan == nil
+	c, ok := customByID(s.custom.name)
+	if !ok || (c.key == nil && !c.keeps) {
+		return false
+	}
+	return customNoOverlay(s, s.ring.any(), s.call.Phase != phone.Idle) && !s.muted && s.linkDown == "" && s.camtest == nil && s.qrscan == nil
 }
 
 // keptCustom is whether the canvas holds the page the custom screen up drew in the frame before, alone,
@@ -341,9 +367,7 @@ func (r *renderer) keptCustom(s scene) bool {
 // (frame's deckDrawn).
 func customFrameKey(s scene, ringing, calling bool) string {
 	c, ok := customByID(s.custom.name)
-	if !ok || c.key == nil || s.showVideo || s.showVideoAsk || s.showVolume || ringing || calling || s.setupAsking ||
-		s.showAnnouncement || s.showReminder || s.showNotification || s.popup != nil || s.pin.open || s.announceRecording ||
-		s.updateActive || s.cue != "" {
+	if !ok || c.key == nil || !customNoOverlay(s, ringing, calling) {
 		return ""
 	}
 	// The time in the top bar changes by the minute.
