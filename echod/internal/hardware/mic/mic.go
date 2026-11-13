@@ -110,6 +110,30 @@ type Source struct {
 	finder     *Beamformer
 	facing     atomic.Int32
 	wantFacing atomic.Bool
+
+	// Stereo 2-mic azimuth estimator state
+	wantAzimuth  atomic.Bool
+	azimuthState atomic.Pointer[azimuthResult]
+}
+
+type azimuthResult struct {
+	azimuth    float64
+	confidence float64
+	ok         bool
+}
+
+// Azimuth returns the latest estimated sound arrival azimuth in [-1.0, +1.0] (left-to-right),
+// confidence in [0.0, 1.0], and whether an estimate is available.
+//
+// Like Facing(), calling Azimuth() signals demand. The first call starts computation on the next
+// stereo frame; subsequent calls return the latest estimate lock-free.
+func (s *Source) Azimuth() (azimuth float64, confidence float64, ok bool) {
+	s.wantAzimuth.Store(true)
+	st := s.azimuthState.Load()
+	if st == nil {
+		return 0, 0, false
+	}
+	return st.azimuth, st.confidence, st.ok
 }
 
 // SetMixing chooses how the microphones are combined. It takes effect on the next frame, and reports
@@ -474,6 +498,14 @@ func (s *Source) broadcastSelected(raw []byte, cut bool, external *aspResponse) 
 	// The recent history is kept whether or not anyone is listening: a wake word is only recognized
 	// once it has been said, so by the time a turn starts, the words after it are already past.
 	mics := Decode(raw)
+	if len(mics) == 2 && s.wantAzimuth.Swap(false) {
+		az, conf, ok := EstimateAzimuth(mics[0], mics[1], Rate, 0.055)
+		s.azimuthState.Store(&azimuthResult{
+			azimuth:    az,
+			confidence: conf,
+			ok:         ok,
+		})
+	}
 	frame := s.mixer.Mix(mics)
 
 	// While something is playing, an echo canceled fixed path replaces the mix (cancelInput): the filter
