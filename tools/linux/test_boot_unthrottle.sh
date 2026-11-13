@@ -23,6 +23,8 @@ G=$SYS_ROOT/devices/system/cpu/cpufreq/interactive
 for f in hispeed_freq go_hispeed_load timer_rate min_sample_time; do : > "$G/$f"; done
 echo "[mq-deadline] none" > "$SYS_ROOT/block/mmcblk0/queue/scheduler"
 : > "$SYS_ROOT/block/mmcblk0/queue/read_ahead_kb"
+mkdir -p "$SYS_ROOT/devices/system/cpu/cpufreq/policy0"
+echo mt8163-cpufreq > "$SYS_ROOT/devices/system/cpu/cpufreq/policy0/scaling_driver"
 for tool in mkswap swapon sysctl; do
 	printf '#!/bin/sh\necho "%s $*" >> "%s/calls"\n' "$tool" "$T" > "$T/bin/$tool"
 	chmod +x "$T/bin/$tool"
@@ -50,6 +52,18 @@ check gov.hispeed_freq "$(cat "$G/hispeed_freq")" 1300000
 check gov.go_hispeed_load "$(cat "$G/go_hispeed_load")" 85
 check gov.timer_rate "$(cat "$G/timer_rate")" 20000
 check gov.min_sample_time "$(cat "$G/min_sample_time")" 40000
+
+# Gate: cronos on the mainline kernel (mtk-cpufreq) is left alone.
+rm -f "$T/calls"
+: > "$SYS_ROOT/block/zram0/comp_algorithm"
+echo mtk-cpufreq > "$SYS_ROOT/devices/system/cpu/cpufreq/policy0/scaling_driver"
+echo "[mq-deadline] none" > "$SYS_ROOT/block/mmcblk0/queue/scheduler"
+t5_cronos_unthrottle
+check gate.mainline.zram "$(cat "$SYS_ROOT/block/zram0/comp_algorithm")" ""
+check gate.mainline.scheduler "$(cat "$SYS_ROOT/block/mmcblk0/queue/scheduler")" "[mq-deadline] none"
+[ ! -e "$T/calls" ]
+check gate.mainline.no-tools $? 0
+echo mt8163-cpufreq > "$SYS_ROOT/devices/system/cpu/cpufreq/policy0/scaling_driver"
 
 # Gate: a device that is not cronos is left alone.
 rm -f "$T/calls" "$SYS_ROOT/block/zram0/comp_algorithm"

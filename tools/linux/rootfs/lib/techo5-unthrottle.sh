@@ -17,6 +17,8 @@ t5_cronos_unthrottle() {
 	PROC_ROOT=${PROC_ROOT:-/proc}
 	DEV_ROOT=${DEV_ROOT:-/dev}
 	grep -q 'amazon,cronos' "$PROC_ROOT/device-tree/compatible" 2> /dev/null || return 0
+	# The same board can run a mainline kernel (mtk-cpufreq, schedutil; see boot.sh): this is for the 4.9 one.
+	[ "$(cat "$SYS_ROOT/devices/system/cpu/cpufreq/policy0/scaling_driver" 2> /dev/null)" != mtk-cpufreq ] || return 0
 
 	# ZRAM: 384 MiB of lz4 swap. The 1 GiB board is short of RAM with the daemon, the camera and the
 	# browser up; compressed swap costs far less than refaulting pages from eMMC. page-cluster 0
