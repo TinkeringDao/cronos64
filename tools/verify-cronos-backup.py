@@ -7,10 +7,13 @@ Usage:
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import re
+import stat
 import struct
 import sys
+import tempfile
 import zlib
 
 REQUIRED_PARTITIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15)
@@ -18,7 +21,7 @@ REQUIRED_KERNEL_BANNER = b"Linux version 4.9.337"
 ANDROID_BOOT_MAGIC = b"ANDROID!"
 
 PART_FILE_RE = re.compile(r"^p(\d+)(?:-[^/]+)?\.img$")
-BOOT_FILE_RE = re.compile(r"^(?:mmcblk0)?boot([01])(?:[-_.].*)?$")
+BOOT_FILE_RE = re.compile(r"^(?:mmcblk0)?boot([01])(?:-[^/]+)?(?:\.img)?$")
 SHA256_LINE_RE = re.compile(r"^([0-9a-fA-F]{64}) [ *](.+)$")
 
 GZIP_SIGNATURES = (b"\x1f\x8b\x08",)
@@ -37,11 +40,13 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _try_decompress_contains(buf: bytes, wbits: int, needle: bytes) -> bool:
+def _try_decompress_contains(buf: bytes | memoryview, wbits: int, needle: bytes) -> bool:
     try:
         dec = zlib.decompressobj(wbits)
         out = dec.decompress(buf) + dec.flush()
     except zlib.error:
+        return False
+    if not dec.eof:
         return False
     return needle in out
 
@@ -59,15 +64,34 @@ def _scan_stream_contains(data: bytes, signatures: tuple[bytes, ...], wbits: int
     return False
 
 
-def _extract_bootimg_kernel(data: bytes) -> bytes | None:
+def _page_align(size: int, page_size: int) -> int:
+    return ((size + page_size - 1) // page_size) * page_size
+
+
+def _extract_bootimg_kernel(p9_name: str, data: bytes) -> bytes:
     if len(data) < 44:
-        return None
-    kernel_size = struct.unpack_from("<I", data, 8)[0]
-    page_size = struct.unpack_from("<I", data, 36)[0]
-    if page_size < 64 or kernel_size <= 0:
-        return None
-    if page_size + kernel_size > len(data):
-        return None
+        raise BackupVerificationError(
+            f"{p9_name} (p9 boot): truncated Android boot image header ({len(data)} bytes < 44)"
+        )
+    kernel_size, _ka, ramdisk_size, _ra, second_size, _sa, _tl, page_size, _hv = struct.unpack_from(
+        "<9I", data, 8
+    )
+    if page_size < 64 or page_size > len(data):
+        raise BackupVerificationError(
+            f"{p9_name} (p9 boot): invalid Android boot image page_size={page_size} for {len(data)}-byte image"
+        )
+    if kernel_size <= 0:
+        raise BackupVerificationError(f"{p9_name} (p9 boot): invalid kernel_size={kernel_size}")
+    expected_min_size = (
+        page_size
+        + _page_align(kernel_size, page_size)
+        + _page_align(ramdisk_size, page_size)
+        + _page_align(second_size, page_size)
+    )
+    if expected_min_size > len(data):
+        raise BackupVerificationError(
+            f"{p9_name} (p9 boot): truncated boot image (sections need {expected_min_size} bytes, got {len(data)})"
+        )
     return data[page_size : page_size + kernel_size]
 
 
@@ -78,20 +102,17 @@ def verify_boot_image(p9_path: Path) -> None:
             f"{p9_path.name} (p9 boot): missing {ANDROID_BOOT_MAGIC.decode('ascii')} boot image magic at offset 0"
         )
 
-    kernel_blob = _extract_bootimg_kernel(data)
-    candidates = [kernel_blob, data] if kernel_blob is not None else [data]
+    kernel_blob = _extract_bootimg_kernel(p9_path.name, data)
 
-    for blob in candidates:
-        if REQUIRED_KERNEL_BANNER in blob:
-            return
-        if _try_decompress_contains(blob, 16 + zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
-            return
-        if _try_decompress_contains(blob, zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
-            return
-
-    if _scan_stream_contains(data, GZIP_SIGNATURES, 16 + zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+    if REQUIRED_KERNEL_BANNER in kernel_blob:
         return
-    if _scan_stream_contains(data, ZLIB_SIGNATURES, zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+    if _try_decompress_contains(kernel_blob, 16 + zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+        return
+    if _try_decompress_contains(kernel_blob, zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+        return
+    if _scan_stream_contains(kernel_blob, GZIP_SIGNATURES, 16 + zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+        return
+    if _scan_stream_contains(kernel_blob, ZLIB_SIGNATURES, zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
         return
 
     raise BackupVerificationError(
@@ -147,7 +168,11 @@ def _parse_sha256sums(sums_path: Path) -> tuple[list[str], dict[str, str]]:
     if not sums_path.is_file():
         raise BackupVerificationError(f"missing SHA256SUMS manifest at {sums_path}")
 
-    raw_lines = sums_path.read_text(encoding="utf-8").splitlines()
+    try:
+        raw_lines = sums_path.read_text(encoding="utf-8").splitlines()
+    except (UnicodeDecodeError, OSError) as exc:
+        raise BackupVerificationError(f"unreadable SHA256SUMS manifest at {sums_path}: {exc}") from exc
+
     entries: dict[str, str] = {}
     for lineno, line in enumerate(raw_lines, start=1):
         if not line.strip():
@@ -168,6 +193,40 @@ def _parse_sha256sums(sums_path: Path) -> tuple[list[str], dict[str, str]]:
     return raw_lines, entries
 
 
+def _write_sha256sums_atomic(sums_path: Path, lines: list[str]) -> None:
+    mode = stat.S_IMODE(sums_path.stat().st_mode)
+    payload = "\n".join(lines) + "\n"
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=sums_path.parent,
+            prefix=".SHA256SUMS.",
+            delete=False,
+        ) as fh:
+            tmp_path = fh.name
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, sums_path)
+    except OSError as exc:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise BackupVerificationError(f"failed writing SHA256SUMS atomically: {exc}") from exc
+    except BaseException:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
 def verify_backup(backup_dir: str | Path) -> dict[str, object]:
     root = Path(backup_dir)
     if not root.is_dir():
@@ -175,10 +234,7 @@ def verify_backup(backup_dir: str | Path) -> dict[str, object]:
 
     parts, boots = _discover_slot_files(root)
 
-    # Explicit lk (p3) and boot image (p9) validation before/alongside hash check.
-    p3_path = parts[3]
-    if p3_path.stat().st_size <= 0:
-        raise BackupVerificationError(f"{p3_path.name} (p3 lk) is empty")
+    # Validate Android boot image (p9) header, bounds, and 4.9.337 kernel payload.
     verify_boot_image(parts[9])
 
     sums_path = root / "SHA256SUMS"
@@ -216,7 +272,7 @@ def verify_backup(backup_dir: str | Path) -> dict[str, object]:
             appended.append(bpath.name)
 
     if appended:
-        sums_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        _write_sha256sums_atomic(sums_path, new_lines)
 
     return {
         "ok": True,

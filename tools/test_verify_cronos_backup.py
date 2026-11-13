@@ -45,25 +45,38 @@ PART_NAMES = {
 }
 
 
-def make_boot_image(kernel_payload: bytes, magic: bytes = b"ANDROID!", page_size: int = 2048) -> bytes:
-    header = bytearray(page_size)
+def make_boot_image(
+    kernel_payload: bytes,
+    magic: bytes = b"ANDROID!",
+    page_size: int = 2048,
+    *,
+    ramdisk_payload: bytes = b"",
+    declared_kernel_size: int | None = None,
+    declared_ramdisk_size: int | None = None,
+    declared_second_size: int = 0,
+) -> bytes:
+    header_size = max(page_size, 44)
+    header = bytearray(header_size)
     header[: len(magic)] = magic
+    ks = len(kernel_payload) if declared_kernel_size is None else declared_kernel_size
+    rs = len(ramdisk_payload) if declared_ramdisk_size is None else declared_ramdisk_size
     struct.pack_into(
         "<9I",
         header,
         8,
-        len(kernel_payload),  # kernel_size
+        ks,                   # kernel_size
         0x40080000,           # kernel_addr
-        0,                    # ramdisk_size
+        rs,                   # ramdisk_size
         0x44000000,           # ramdisk_addr
-        0,                    # second_size
+        declared_second_size, # second_size
         0x40F00000,           # second_addr
         0x40000100,           # tags_addr
         page_size,            # page_size
         0,                    # header_version
     )
-    pad = (-len(kernel_payload)) % page_size
-    return bytes(header) + kernel_payload + (b"\x00" * pad)
+    kpad = (-len(kernel_payload)) % page_size if page_size > 0 else 0
+    rpad = (-len(ramdisk_payload)) % page_size if page_size > 0 else 0
+    return bytes(header) + kernel_payload + (b"\x00" * kpad) + ramdisk_payload + (b"\x00" * rpad)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -271,6 +284,114 @@ class VerifyCronosBackupTest(unittest.TestCase):
             res = run_cli(bdir)
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("p3", res.stderr.lower())
+
+    @staticmethod
+    def _rewrite_p9(bdir: Path, payload: bytes) -> None:
+        (bdir / "p9-boot.img").write_bytes(payload)
+        lines = (bdir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+        new_lines = [
+            f"{sha256_bytes(payload)}  p9-boot.img" if ln.endswith("p9-boot.img") else ln
+            for ln in lines
+        ]
+        (bdir / "SHA256SUMS").write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+    def test_p9_truncated_header_and_section_bounds_rejected(self):
+        valid_kernel = gzip.compress(b"\x00Linux version 4.9.337-g8d928c5176cc\x00")
+        cases = {
+            "short_header": b"ANDROID!" + b"\x00" * 16,
+            "kernel_exceeds_file": make_boot_image(
+                b"\x00Linux version 4.9.337\x00",
+                declared_kernel_size=65536,
+            ),
+            "ramdisk_exceeds_file": make_boot_image(
+                valid_kernel,
+                declared_ramdisk_size=65536,
+            ),
+            "second_exceeds_file": make_boot_image(
+                valid_kernel,
+                declared_second_size=65536,
+            ),
+            "zero_page_size": make_boot_image(
+                b"\x00Linux version 4.9.337\x00",
+                page_size=0,
+            ),
+            "zero_kernel_size": make_boot_image(
+                b"\x00Linux version 4.9.337\x00",
+                declared_kernel_size=0,
+            ),
+            "banner_only_in_ramdisk": make_boot_image(
+                b"\x00" * 128,
+                ramdisk_payload=b"Linux version 4.9.337",
+            ),
+        }
+        for label, payload in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                bdir = build_backup_dir(Path(tmp) / label)
+                self._rewrite_p9(bdir, payload)
+                res = run_cli(bdir)
+                self.assertNotEqual(res.returncode, 0, msg=f"{label} unexpectedly passed")
+                self.assertTrue(res.stderr.strip(), msg=f"{label} missing stderr diagnostic")
+
+    def test_p9_truncated_gzip_trailer_rejected(self):
+        full_gz = gzip.compress(b"\x00Linux version 4.9.337-g8d928c5176cc\x00" * 4)
+        truncated_gz = full_gz[:-8]
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(Path(tmp) / "trunc_gz")
+            self._rewrite_p9(bdir, make_boot_image(truncated_gz))
+            res = run_cli(bdir)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("4.9.337", res.stderr)
+
+    def test_missing_sha256sums_manifest_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(Path(tmp) / "no_sums")
+            (bdir / "SHA256SUMS").unlink()
+            res = run_cli(bdir)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("SHA256SUMS", res.stderr)
+
+    def test_conflicting_sha256sums_entries_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(Path(tmp) / "conflict_sums")
+            with (bdir / "SHA256SUMS").open("a", encoding="utf-8") as fh:
+                fh.write("0" * 64 + "  p1-proinfo.img\n")
+            res = run_cli(bdir)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("p1-proinfo.img", res.stderr)
+
+    def test_duplicate_boot_slot_files_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(Path(tmp) / "dup_boot")
+            (bdir / "boot0.img").write_bytes(b"duplicate-boot0")
+            res = run_cli(bdir)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("boot0", res.stderr.lower())
+
+    def test_auxiliary_non_image_boot_files_ignored_and_rejected_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(Path(tmp) / "aux_boot")
+            (bdir / "boot0.txt").write_text("note\n", encoding="utf-8")
+            (bdir / "mmcblk0boot0.img.bak").write_bytes(b"bak")
+            (bdir / "boot0.sha256").write_text("0" * 64 + "\n", encoding="utf-8")
+            res = run_cli(bdir)
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(Path(tmp) / "only_txt_boot")
+            (bdir / "mmcblk0boot0.img").unlink()
+            (bdir / "boot0.txt").write_text("not-an-image\n", encoding="utf-8")
+            res = run_cli(bdir)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("boot0", res.stderr.lower())
+
+    def test_non_utf8_sha256sums_rejected_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(Path(tmp) / "bad_utf8")
+            (bdir / "SHA256SUMS").write_bytes(b"\xff\xfe\xfd\x80\n")
+            res = run_cli(bdir)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("error:", res.stderr.lower())
+            self.assertNotIn("Traceback", res.stderr)
 
 
 if __name__ == "__main__":
