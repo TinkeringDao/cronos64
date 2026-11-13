@@ -50,6 +50,11 @@ type Brain struct {
 	// ReplyPlayer is a Home Assistant media_player entity id that the assistant's spoken replies play
 	// on instead of this device's speaker. Empty is this device's own speaker.
 	ReplyPlayer string `json:"reply_player,omitempty"`
+
+	// VLM is an optional vision-language chat endpoint's base, like http://10.0.0.20:8081/v1, and
+	// VisionModel the model to ask for when looking through the camera. Empty falls back to LLM and Model.
+	VLM         string `json:"vlm,omitempty"`
+	VisionModel string `json:"vision_model,omitempty"`
 }
 
 // ValidReplyPlayer cleans up an entity id typed for Brain.ReplyPlayer and says whether it is one: empty
@@ -81,6 +86,22 @@ const (
 // Direct is whether turns go to the direct pipeline, and it is set up enough to run one.
 func (b Brain) Direct() bool {
 	return b.Mode == BrainDirect && b.STT != "" && b.TTS != "" && b.LLM != ""
+}
+
+// EffectiveVLM returns VLM when configured, falling back to LLM.
+func (b Brain) EffectiveVLM() string {
+	if v := strings.TrimSpace(b.VLM); v != "" {
+		return v
+	}
+	return strings.TrimSpace(b.LLM)
+}
+
+// EffectiveVisionModel returns VisionModel when configured, falling back to Model.
+func (b Brain) EffectiveVisionModel() string {
+	if m := strings.TrimSpace(b.VisionModel); m != "" {
+		return m
+	}
+	return strings.TrimSpace(b.Model)
 }
 
 type BrainWriter struct{ st *Store }
