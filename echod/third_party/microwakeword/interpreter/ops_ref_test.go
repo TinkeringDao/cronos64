@@ -364,3 +364,86 @@ func refDepthwiseConv2D(interp *Interpreter, op model.Operator) error {
 	}
 	return nil
 }
+
+// refFullyConnected is opFullyConnected as published: the inner product one element at a time.
+// Input: [batch, inputSize], Weights: [outputSize, inputSize], Bias: [outputSize]
+func refFullyConnected(interp *Interpreter, op model.Operator) error {
+	if len(op.Inputs) < 3 || len(op.Outputs) != 1 {
+		return fmt.Errorf("FULLY_CONNECTED: bad io")
+	}
+	sg := interp.model.Subgraphs[interp.sgIdx]
+
+	inT := sg.Tensors[op.Inputs[0]]
+	weightT := sg.Tensors[op.Inputs[1]]
+	outT := sg.Tensors[op.Outputs[0]]
+
+	inData := interp.tensors[op.Inputs[0]].data
+	weightData := interp.tensors[op.Inputs[1]].data
+	biasData := interp.tensors[op.Inputs[2]].data
+	outData := interp.tensors[op.Outputs[0]].data
+
+	activation := 0
+	if v, ok := op.Options["fused_activation"]; ok {
+		activation = v.(int)
+	}
+
+	// For FC, input is flattened. Total input size from weights.
+	outputSize := weightT.Shape[0]
+	inputSize := weightT.Shape[1]
+	batch := model.TensorSize(inT.Shape) / inputSize
+
+	inputZP := int32(0)
+	if len(inT.Quant.ZeroPoint) > 0 {
+		inputZP = int32(inT.Quant.ZeroPoint[0])
+	}
+	outputZP := int32(0)
+	if len(outT.Quant.ZeroPoint) > 0 {
+		outputZP = int32(outT.Quant.ZeroPoint[0])
+	}
+
+	inScale := float64(0)
+	if len(inT.Quant.Scale) > 0 {
+		inScale = float64(inT.Quant.Scale[0])
+	}
+	outScale := float64(0)
+	if len(outT.Quant.Scale) > 0 {
+		outScale = float64(outT.Quant.Scale[0])
+	}
+	// FC may have per-channel or single scale
+	qmuls := make([]QuantMultiplier, outputSize)
+	for c := 0; c < outputSize; c++ {
+		wScale := float64(0)
+		if c < len(weightT.Quant.Scale) {
+			wScale = float64(weightT.Quant.Scale[c])
+		} else if len(weightT.Quant.Scale) > 0 {
+			wScale = float64(weightT.Quant.Scale[0])
+		}
+		if outScale == 0 {
+			outScale = 1.0
+		}
+		qmuls[c] = QuantizeMultiplier(inScale * wScale / outScale)
+	}
+
+	actMin, actMax := activationBounds(activation, outputZP)
+
+	for b := 0; b < batch; b++ {
+		for oc := 0; oc < outputSize; oc++ {
+			acc := int32(getBias32(biasData, oc))
+			for ic := 0; ic < inputSize; ic++ {
+				inVal := int32(int8(inData[b*inputSize+ic])) - inputZP
+				wVal := int32(int8(weightData[oc*inputSize+ic]))
+				acc += inVal * wVal
+			}
+			acc = MultiplyByQuantizedMultiplier(acc, qmuls[oc])
+			acc += outputZP
+			if acc < actMin {
+				acc = actMin
+			}
+			if acc > actMax {
+				acc = actMax
+			}
+			outData[b*outputSize+oc] = byte(int8(ClampInt8(acc)))
+		}
+	}
+	return nil
+}

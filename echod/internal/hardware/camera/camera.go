@@ -206,24 +206,15 @@ const (
 	m4uPortIMGO       = 24
 )
 
-type ionAlloc struct {
-	Len, Align, HeapIDMask, Flags uint32
-	Handle                        int32
-}
+// The structs that carry pointers, sizes or MediaTek's handle union (sensControl, sensFeature,
+// ionAlloc, ionCustom, ionSysGetPhysP, ionMMConfig) differ between a 64-bit daemon, which the kernel
+// serves through unlocked_ioctl, and a 32-bit one, served through compat_ioctl: they are in
+// ioctl_layout_lp64.go and ioctl_layout_ilp32.go. The rest are the same on both.
 type ionFd struct{ Handle, Fd int32 }
-type ionCustom struct{ Cmd, Arg uint32 }
-type ionMMConfig struct {
-	Handle                                           int32
-	ModuleID, Security, Coherent, IovaStart, IovaEnd uint32
-}
 type ionMMData struct {
 	MMCmd  uint32
 	Config ionMMConfig
 	_      [64]byte
-}
-type ionSysGetPhysP struct {
-	Handle       int32
-	PhyAddr, Len uint32
 }
 type ionSysData struct {
 	SysCmd uint32
@@ -236,6 +227,15 @@ type m4uPort struct {
 }
 
 func ioc(dir, typ, nr, size uintptr) uintptr { return dir<<30 | size<<16 | typ<<8 | nr }
+
+// The requests whose number carries the size of an argument that differs between the ABIs.
+var (
+	reqSensControl = ioc(3, sensMagic, nrControl, unsafe.Sizeof(sensControl{}))
+	reqSensFeature = ioc(3, sensMagic, nrFeature, unsafe.Sizeof(sensFeature{}))
+	reqIonAlloc    = ioc(3, 'I', 0, unsafe.Sizeof(ionAlloc{}))
+	reqIonShare    = ioc(3, 'I', 4, unsafe.Sizeof(ionFd{}))
+	reqIonCustom   = ioc(3, 'I', 6, unsafe.Sizeof(ionCustom{}))
+)
 
 func ioctl(fd int, req uintptr, arg unsafe.Pointer) error {
 	_, _, e := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), req, uintptr(arg))
@@ -353,11 +353,11 @@ func open() (*device, error) {
 	setupCSI2(d.sen, d.mipi)
 
 	// Preview mode; the sensor's mode table ends with stream-on.
-	window, config := heapNew[[256]byte](), heapNew[[256]byte]()
-	ctl := [4]uint32{sensorMain, 0, ptr32(window), ptr32(config)}
-	err = ioctl(d.sens, ioc(3, sensMagic, nrControl, 16), unsafe.Pointer(&ctl[0]))
-	runtime.KeepAlive(window)
-	runtime.KeepAlive(config)
+	var pin runtime.Pinner
+	window, config := new([256]byte), new([256]byte)
+	ctl := sensControl{InvokeIdx: sensorMain, WindowP: pinAddr(&pin, window), ConfigP: pinAddr(&pin, config)}
+	err = ioctl(d.sens, reqSensControl, unsafe.Pointer(&ctl))
+	pin.Unpin()
 	if err != nil {
 		d.close()
 		return nil, fmt.Errorf("sensor control: %w", err)
@@ -373,16 +373,15 @@ func open() (*device, error) {
 // setFeature is KDIMGSENSORIOC_X_FEATURECONCTROL with one integer parameter. The kernel is 64-bit
 // and reads the parameter as an unsigned long, so eight bytes go over.
 func (d *device) setFeature(id uint32, v uint64) {
-	para, size := heapNew[[8]byte](), heapNew[uint32]()
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	para, size := new([8]byte), new(uint32)
 	for i := range para {
 		para[i] = byte(v >> (8 * i))
 	}
 	*size = uint32(len(para))
-	ctl := [4]uint32{sensorMain, id, ptr32(para), ptr32(size)}
-	err := ioctl(d.sens, ioc(3, sensMagic, nrFeature, 16), unsafe.Pointer(&ctl[0]))
-	runtime.KeepAlive(para)
-	runtime.KeepAlive(size)
-	if err != nil {
+	ctl := sensFeature{InvokeIdx: sensorMain, FeatureId: id, ParaP: pinAddr(&pin, para), ParaLenP: pinAddr(&pin, size)}
+	if err := ioctl(d.sens, reqSensFeature, unsafe.Pointer(&ctl)); err != nil {
 		slog.Warn("camera: sensor feature", "id", id, "err", err)
 	}
 }
@@ -506,12 +505,12 @@ func (d *device) allocBuffers() error {
 		return fmt.Errorf("open ion: %w", err)
 	}
 	size := slots * frameBytes
-	a := ionAlloc{Len: uint32(size), Align: 4096, HeapIDMask: 1 << ionHeapMultimedia}
-	if err := ioctl(d.ion, ioc(3, 'I', 0, unsafe.Sizeof(a)), unsafe.Pointer(&a)); err != nil {
+	a := ionAlloc{Len: uintptr(size), Align: 4096, HeapIDMask: 1 << ionHeapMultimedia}
+	if err := ioctl(d.ion, reqIonAlloc, unsafe.Pointer(&a)); err != nil {
 		return fmt.Errorf("ion alloc: %w", err)
 	}
 	share := ionFd{Handle: a.Handle}
-	if err := ioctl(d.ion, ioc(3, 'I', 4, unsafe.Sizeof(share)), unsafe.Pointer(&share)); err != nil {
+	if err := ioctl(d.ion, reqIonShare, unsafe.Pointer(&share)); err != nil {
 		return fmt.Errorf("ion share: %w", err)
 	}
 	d.buf, err = unix.Mmap(int(share.Fd), 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
@@ -519,20 +518,16 @@ func (d *device) allocBuffers() error {
 	if err != nil {
 		return fmt.Errorf("mmap ion buffer: %w", err)
 	}
-	cfg := heapNew[ionMMData]()
-	*cfg = ionMMData{MMCmd: ionMMConfigBuffer, Config: ionMMConfig{Handle: a.Handle, ModuleID: m4uPortIMGO}}
-	c := ionCustom{Cmd: ionCmdMultimedia, Arg: ptr32(cfg)}
-	err = ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c))
-	runtime.KeepAlive(cfg)
-	if err != nil {
+	var pin runtime.Pinner
+	defer pin.Unpin()
+	cfg := &ionMMData{MMCmd: ionMMConfigBuffer, Config: ionMMConfig{Handle: a.Handle, ModuleID: m4uPortIMGO}}
+	c := ionCustom{Cmd: ionCmdMultimedia, Arg: pinAddr(&pin, cfg)}
+	if err := ioctl(d.ion, reqIonCustom, unsafe.Pointer(&c)); err != nil {
 		return fmt.Errorf("ion config buffer: %w", err)
 	}
-	phys := heapNew[ionSysData]()
-	*phys = ionSysData{SysCmd: ionSysGetPhys, Phys: ionSysGetPhysP{Handle: a.Handle}}
-	c = ionCustom{Cmd: ionCmdSystem, Arg: ptr32(phys)}
-	err = ioctl(d.ion, ioc(3, 'I', 6, unsafe.Sizeof(c)), unsafe.Pointer(&c))
-	runtime.KeepAlive(phys)
-	if err != nil {
+	phys := &ionSysData{SysCmd: ionSysGetPhys, Phys: ionSysGetPhysP{Handle: a.Handle}}
+	c = ionCustom{Cmd: ionCmdSystem, Arg: pinAddr(&pin, phys)}
+	if err := ioctl(d.ion, reqIonCustom, unsafe.Pointer(&c)); err != nil {
 		return fmt.Errorf("ion get phys: %w", err)
 	}
 	if phys.Phys.PhyAddr == 0 {

@@ -4,6 +4,16 @@
 #
 #   tools/linux/deploy-rootfs.sh --out rootfs.tar.gz [--version vX.Y.Z]            build here, keep the file
 #   HOST=<unit> tools/linux/deploy-rootfs.sh [--install] [--reboot] [--version vX.Y.Z] [--on-device]
+#   tools/linux/deploy-rootfs.sh ... [--arch armv7|aarch64]    the root's architecture (below)
+#   tools/linux/deploy-rootfs.sh [--arch ...] --print-arch     say what would be built, and stop
+#
+# The root's architecture: armv7, every board's userspace, or aarch64, a 64-bit one for a board whose
+# kernel is 64-bit, with the daemon and tools built GOOS=linux GOARCH=arm64 CGO_ENABLED=0 (bin/echod-arm64)
+# and an aarch64 Alpine base (tools/fetch-inputs.py --arch aarch64). A DEVICE_OVERLAY whose
+# etc/techo5/device.conf says T5_BOARD=cronos builds aarch64 unless --arch says otherwise; everything else
+# armv7. In an aarch64 root a helper built elsewhere (AEC, librespot, AirPlay 2, ffmpeg) goes in as its
+# bin/<name>-arm64 build, else as its armv7 build if that is static (the kernel runs it through compat),
+# else not at all, with a warning: a dynamically linked armv7 helper has no loader in a 64-bit root.
 #
 # Where the root filesystem is built:
 #   Linux (x86_64)   here, when qemu-user-static and binfmt-support are installed and Alpine's static apk
@@ -43,9 +53,11 @@ DEVICE_OVERLAY=${DEVICE_OVERLAY:-}
 # Skylight's is tools/linux/skylight/kernel/build.sh's boot-skylight.img, and goes to recovery as it is.
 # Without it the rootfs leaves the unit's kernel as it is.
 KERNEL_IMAGE=${KERNEL_IMAGE:-}
-INSTALL=; REBOOT=; ONDEVICE=; KEEP=
+INSTALL=; REBOOT=; ONDEVICE=; KEEP=; ARCH=; PRINT_ARCH=
 while [ $# -gt 0 ]; do
 	case "$1" in
+	--arch) ARCH=$2; shift 2;;
+	--print-arch) PRINT_ARCH=1; shift;;
 	--out) KEEP=$2; shift 2;;
 	--install) INSTALL=1; shift;;
 	--reboot) REBOOT=1; shift;;
@@ -54,6 +66,22 @@ while [ $# -gt 0 ]; do
 	*) echo "unknown argument: $1" >&2; exit 1;;
 	esac
 done
+
+# The board, from the overlay (none for the Show's and the Spot's builds: sed's failure must not end the
+# script, pipefail), and from it the root's architecture unless --arch gave one.
+board=$( (sed -n 's/^T5_BOARD=//p' "${DEVICE_OVERLAY:-/nonexistent}/etc/techo5/device.conf" 2>/dev/null || true) | tr -d '\r"' | tail -1)
+if [ -z "$ARCH" ]; then
+	case "$board" in cronos) ARCH=aarch64;; *) ARCH=armv7;; esac
+fi
+case "$ARCH" in
+armv7) GOARCH_T=arm; SFX=arm;;
+aarch64) GOARCH_T=arm64; SFX=arm64;;
+*) echo "--arch takes armv7 or aarch64, not $ARCH" >&2; exit 1;;
+esac
+if [ -n "$PRINT_ARCH" ]; then
+	echo "arch=$ARCH goarch=$GOARCH_T daemon=bin/echod-$SFX"
+	exit 0
+fi
 
 [ -n "$HOST" ] || [ -n "$KEEP" ] || { echo "HOST is not set: HOST=<the device's address> $0 ..., or $0 --out rootfs.tar.gz" >&2; exit 1; }
 [ -z "$KEEP" ] || [ -z "$ONDEVICE" ] || { echo "--out builds on this computer; it does not go with --on-device" >&2; exit 1; }
@@ -72,8 +100,14 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 STAGE=$ROOT/bin/rootfs-stage
 SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=no "root@$HOST")
 
-echo "== building for armv7 ($VERSION)"
-export GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0
+# elf_is <file> <class: 01 ELF32, 02 ELF64> <e_machine: 40 ARM, 183 AArch64>
+elf_is() { [ "$(od -An -tx1 -j4 -N1 "$1" | tr -d ' ')" = "$2" ] && [ "$(od -An -tu2 -j18 -N2 "$1" | tr -d ' ')" = "$3" ]; }
+is_static() { ! grep -q 'ld-musl-\|ld-linux-' "$1"; }
+case "$ARCH" in armv7) ELF_CLASS=01 ELF_MACHINE=40;; aarch64) ELF_CLASS=02 ELF_MACHINE=183;; esac
+
+echo "== building for $ARCH ($VERSION)"
+export GOOS=linux GOARCH=$GOARCH_T CGO_ENABLED=0
+if [ "$ARCH" = armv7 ]; then export GOARM=7; fi
 pkg=github.com/HuskerMinion/techo5/echod/internal/layout
 commit=$(git -C "$ROOT" rev-parse --short HEAD)
 # BUILD_DATE fixes the date stamped in the daemon, so two images built from one commit (the Show's and
@@ -85,40 +119,60 @@ if [ -n "${PREBUILT_DAEMON:-}" ]; then
 	tag=${BUILD_TAGS:+$BUILD_TAGS-}$VERSION
 	gh attestation verify "$PREBUILT_DAEMON" --repo HuskerMinion/techo5 --source-ref "refs/tags/$tag" >/dev/null \
 		|| { echo "$PREBUILT_DAEMON is not attested as built by CI from tag $tag" >&2; exit 1; }
-	cp "$PREBUILT_DAEMON" "$ROOT/bin/echod-arm"
+	cp "$PREBUILT_DAEMON" "$ROOT/bin/echod-$SFX"
 else
-	(cd "$ROOT/echod" && "$GO" build -tags "$BUILD_TAGS" -trimpath -ldflags "-s -w -X $pkg.Version=$VERSION -X $pkg.GitCommit=$commit -X $pkg.BuildDate=$date" -o "$ROOT/bin/echod-arm" ./cmd/echod)
+	(cd "$ROOT/echod" && "$GO" build -tags "$BUILD_TAGS" -trimpath -ldflags "-s -w -X $pkg.Version=$VERSION -X $pkg.GitCommit=$commit -X $pkg.BuildDate=$date" -o "$ROOT/bin/echod-$SFX" ./cmd/echod)
 fi
+elf_is "$ROOT/bin/echod-$SFX" $ELF_CLASS $ELF_MACHINE || { echo "bin/echod-$SFX is not an $ARCH binary" >&2; exit 1; }
 # audioprobe lives in the daemon's module so it shares the daemon's ALSA code rather than a copy of it.
 for c in fbprobe audioprobe rebootto btbridge; do
 	m=$ROOT; [ -d "$ROOT/echod/cmd/$c" ] && m=$ROOT/echod
-	(cd "$m" && "$GO" build -trimpath -ldflags "-s -w" -o "$ROOT/bin/$c-arm" "./cmd/$c")
+	(cd "$m" && "$GO" build -trimpath -ldflags "-s -w" -o "$ROOT/bin/$c-$SFX" "./cmd/$c")
 done
 unset GOOS GOARCH GOARM CGO_ENABLED
 
 echo "== staging"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/tools" "$STAGE/overlay" "$STAGE/inputs/apks312"
-cp "$ROOT/bin/echod-arm" "$STAGE/bin/techo5"
-for c in fbprobe audioprobe rebootto btbridge; do cp "$ROOT/bin/$c-arm" "$STAGE/bin/$c"; done
-# The WebRTC echo canceller helper is C++ built separately (tools/linux/build-aec.sh in WSL); ship it when it is there.
-[ -e "$ROOT/bin/techo5-aec-arm" ] && cp "$ROOT/bin/techo5-aec-arm" "$STAGE/bin/techo5-aec"
-# The Spotify Connect receiver (librespot, Rust) is built separately too (tools/linux/build-librespot.sh in WSL).
-[ -e "$ROOT/bin/techo5-librespot-arm" ] && cp "$ROOT/bin/techo5-librespot-arm" "$STAGE/bin/techo5-librespot"
-# AirPlay 2's receiver and nqptp, the clock it needs (tools/linux/build-shairport-sync.sh, Linux or WSL): in
-# every image, which the daemon runs where it can and keeps the classic receiver where it can't
-# (feature/streaming). Not optional: an image without them would quietly be classic AirPlay only.
-for b in techo5-shairport-sync techo5-nqptp; do
-	[ -e "$ROOT/bin/$b-arm" ] || { echo "bin/$b-arm is missing: build it with tools/linux/build-shairport-sync.sh" >&2; exit 1; }
-	cp "$ROOT/bin/$b-arm" "$STAGE/bin/$b"
-	echo "== $b: sha256 $(sha256sum "$ROOT/bin/$b-arm" | cut -d' ' -f1)"
-done
-# The video player's decoder (ffmpeg, C, tools/linux/build-ffmpeg.sh in WSL), for the Show's and the Spot's video
-# player (feature/video). Not optional: an image without it offers Video and plays nothing, so a build that
-# lacks it stops here rather than ship that. Its SHA-256 is said, to check against the one build-ffmpeg.sh printed.
-[ -e "$ROOT/bin/techo5-ffmpeg-arm" ] || { echo "bin/techo5-ffmpeg-arm is missing: build it with tools/linux/build-ffmpeg.sh (in WSL)" >&2; exit 1; }
-cp "$ROOT/bin/techo5-ffmpeg-arm" "$STAGE/bin/techo5-ffmpeg"
-echo "== ffmpeg: sha256 $(sha256sum "$ROOT/bin/techo5-ffmpeg-arm" | cut -d' ' -f1)"
+cp "$ROOT/bin/echod-$SFX" "$STAGE/bin/techo5"
+for c in fbprobe audioprobe rebootto btbridge; do cp "$ROOT/bin/$c-$SFX" "$STAGE/bin/$c"; done
+# helper64 <name>: a helper for the aarch64 root (see the top): bin/<name>-arm64, else a static
+# bin/<name>-arm, else none, said.
+helper64() {
+	local f
+	for f in "$ROOT/bin/$1-arm64" "$ROOT/bin/$1-arm"; do
+		[ -e "$f" ] || continue
+		if is_static "$f" && { elf_is "$f" 02 183 || elf_is "$f" 01 40; }; then
+			cp "$f" "$STAGE/bin/$1"
+			echo "== $1 ($(basename "$f")): sha256 $(sha256sum "$f" | cut -d' ' -f1)"
+			return 0
+		fi
+		echo "== $1: $(basename "$f") is not a static ARM binary, so it cannot run in an aarch64 root"
+	done
+	echo "== warning: no bin/$1-arm64 (or static bin/$1-arm): the aarch64 image goes without $1" >&2
+}
+if [ "$ARCH" = aarch64 ]; then
+	for b in techo5-aec techo5-librespot techo5-shairport-sync techo5-nqptp techo5-ffmpeg; do helper64 "$b"; done
+else
+	# The WebRTC echo canceller helper is C++ built separately (tools/linux/build-aec.sh in WSL); ship it when it is there.
+	[ -e "$ROOT/bin/techo5-aec-arm" ] && cp "$ROOT/bin/techo5-aec-arm" "$STAGE/bin/techo5-aec"
+	# The Spotify Connect receiver (librespot, Rust) is built separately too (tools/linux/build-librespot.sh in WSL).
+	[ -e "$ROOT/bin/techo5-librespot-arm" ] && cp "$ROOT/bin/techo5-librespot-arm" "$STAGE/bin/techo5-librespot"
+	# AirPlay 2's receiver and nqptp, the clock it needs (tools/linux/build-shairport-sync.sh, Linux or WSL): in
+	# every image, which the daemon runs where it can and keeps the classic receiver where it can't
+	# (feature/streaming). Not optional: an image without them would quietly be classic AirPlay only.
+	for b in techo5-shairport-sync techo5-nqptp; do
+		[ -e "$ROOT/bin/$b-arm" ] || { echo "bin/$b-arm is missing: build it with tools/linux/build-shairport-sync.sh" >&2; exit 1; }
+		cp "$ROOT/bin/$b-arm" "$STAGE/bin/$b"
+		echo "== $b: sha256 $(sha256sum "$ROOT/bin/$b-arm" | cut -d' ' -f1)"
+	done
+	# The video player's decoder (ffmpeg, C, tools/linux/build-ffmpeg.sh in WSL), for the Show's and the Spot's video
+	# player (feature/video). Not optional: an image without it offers Video and plays nothing, so a build that
+	# lacks it stops here rather than ship that. Its SHA-256 is said, to check against the one build-ffmpeg.sh printed.
+	[ -e "$ROOT/bin/techo5-ffmpeg-arm" ] || { echo "bin/techo5-ffmpeg-arm is missing: build it with tools/linux/build-ffmpeg.sh (in WSL)" >&2; exit 1; }
+	cp "$ROOT/bin/techo5-ffmpeg-arm" "$STAGE/bin/techo5-ffmpeg"
+	echo "== ffmpeg: sha256 $(sha256sum "$ROOT/bin/techo5-ffmpeg-arm" | cut -d' ' -f1)"
+fi
 # Tailscale's daemon (tools/linux/build-tailscaled.sh), for reaching the device from away (feature/tailscale,
 # docs/tailscale.md): off until somebody gives it a key. Every image this script builds carries it, and its
 # license (BSD-3-Clause) beside it. One static arm64 build serves them all, on their 64-bit kernels; on a
@@ -131,8 +185,7 @@ echo "== tailscaled: sha256 $(sha256sum "$TS" | cut -d' ' -f1)"
 # athena and the Skylight carry the 64-bit build beside it (tools/linux/build-ffmpeg-arm64.sh in WSL: static,
 # with H.265, VP8 and VP9), which the daemon runs on their 64-bit kernels; an athena on Amazon's 32-bit
 # kernel keeps the one above. Not optional for them either, and checked for what it must be.
-# No overlay (the Show's and the Spot's builds) is no board: sed's failure must not end the script (pipefail).
-board=$( (sed -n 's/^T5_BOARD=//p' "${DEVICE_OVERLAY:-/nonexistent}/etc/techo5/device.conf" 2>/dev/null || true) | tail -1)
+# (board: from the overlay, worked out at the top.)
 case "$board" in
 athena|skylight)
 	F64=$ROOT/bin/techo5-ffmpeg-arm64
@@ -186,9 +239,11 @@ cp -r "$ROOT/tools/linux/licenses/." "$STAGE/overlay/usr/share/licenses/"
 [ -e "$STAGE/bin/techo5-librespot" ] || rm -rf "$STAGE/overlay/usr/share/licenses/librespot"
 [ -e "$STAGE/bin/techo5-gpu" ] || rm -rf "$STAGE/overlay/usr/share/licenses/mesa"
 [ -e "$STAGE/bin/techo5-jpeg" ] || rm -rf "$STAGE/overlay/usr/share/licenses/libjpeg-turbo"
-cp "$INPUTS"/alpine-minirootfs-*-armv7.tar.gz "$STAGE/inputs/"
+cp "$INPUTS"/alpine-minirootfs-*-"$ARCH".tar.gz "$STAGE/inputs/"
 [ -n "$VENDOR_TGZ" ] && cp "$VENDOR_TGZ" "$STAGE/inputs/vendor.tar.gz"
-cp "$INPUTS"/apks312/wpa_supplicant-2.9-*.apk "$INPUTS"/apks312/libssl1.1-*.apk "$INPUTS"/apks312/libcrypto1.1-*.apk "$STAGE/inputs/apks312/"
+# The root's wpa_supplicant 2.9 set, of the root's architecture (tools/fetch-inputs.py --arch).
+A312=$INPUTS/apks312; [ "$ARCH" = armv7 ] || A312=$INPUTS/apks312-$ARCH
+cp "$A312"/wpa_supplicant-2.9-*.apk "$A312"/libssl1.1-*.apk "$A312"/libcrypto1.1-*.apk "$STAGE/inputs/apks312/"
 # scripts must reach the device with LF endings whatever the checkout did
 # (perl rather than sed -i, which macOS's sed spells differently)
 for f in "$STAGE"/tools/*.sh "$STAGE"/tools/slotctl "$STAGE"/tools/bootctl "$STAGE"/tools/*.txt; do perl -pi -e 's/\r$//' "$f"; done
@@ -224,24 +279,27 @@ fi
 OUT=/data/techo5-linux/techo5-rootfs-$VERSION.tar.gz
 REMOTE=/data/techo5-linux/build
 host_build=
+# The QEMU the packages' triggers need on an x86 host, for the root's architecture.
+EMU=qemu-arm; [ "$ARCH" = aarch64 ] && EMU=qemu-aarch64
 case "$(uname -s)" in
 Linux)
-	[ -z "$ONDEVICE" ] && [ -e /proc/sys/fs/binfmt_misc/qemu-arm ] && [ -x "$HOME/apk/apk.static" ] && host_build=linux;;
+	{ [ -e /proc/sys/fs/binfmt_misc/$EMU ] || { [ "$ARCH" = aarch64 ] && [ "$(uname -m)" = aarch64 ]; }; } \
+		&& [ -z "$ONDEVICE" ] && [ -x "$HOME/apk/apk.static" ] && host_build=linux;;
 MINGW*|MSYS*|CYGWIN*)
 	# Git Bash on Windows: the build runs in WSL.
 	[ -z "$ONDEVICE" ] && command -v wsl.exe >/dev/null 2>&1 \
-		&& wsl.exe -d "$WSL_DISTRO" -- bash -c 'test -e /proc/sys/fs/binfmt_misc/qemu-arm -a -x "$HOME/apk/apk.static"' 2>/dev/null \
+		&& wsl.exe -d "$WSL_DISTRO" -- bash -c "test -e /proc/sys/fs/binfmt_misc/$EMU -a -x \"\$HOME/apk/apk.static\"" 2>/dev/null \
 		&& host_build=wsl;;
 esac
 if [ -n "$KEEP" ] && [ -z "$host_build" ]; then
-	echo "--out needs a local build: on Linux install qemu-user-static and binfmt-support and put apk.static at ~/apk/apk.static;" >&2
+	echo "--out needs a local build: on Linux install qemu-user-static and binfmt-support ($EMU) and put apk.static at ~/apk/apk.static;" >&2
 	echo "on Windows the same inside WSL. Elsewhere set HOST and build on the unit instead." >&2
 	exit 1
 fi
 
 if [ "$host_build" = linux ]; then
 	echo "== building the rootfs here"
-	bash "$ROOT/tools/linux/wsl-build.sh" "$STAGE" "$VERSION" "$TZ_NAME" >/dev/null
+	bash "$ROOT/tools/linux/wsl-build.sh" "$STAGE" "$VERSION" "$TZ_NAME" "$ARCH" >/dev/null
 	tarball=${TECHO5_BUILD_DIR:-$HOME/techo5-build}/rootfs.tar.gz
 	[ -s "$tarball" ] || { echo "the build failed" >&2; exit 1; }
 	if [ -n "$KEEP" ]; then
@@ -256,7 +314,7 @@ elif [ -n "$host_build" ]; then
 	stage_wsl=$(cygpath -u "$STAGE" | sed 's|^/\([a-zA-Z]\)/|/mnt/\L\1/|')
 	# The build itself lives in tools/linux/wsl-build.sh: one script, no quoting across wsl.exe.
 	helper=$(cygpath -u "$ROOT/tools/linux/wsl-build.sh" | sed 's|^/\([a-zA-Z]\)/|/mnt/\L\1/|')
-	tarball=$(MSYS_NO_PATHCONV=1 wsl.exe -d "$WSL_DISTRO" -- bash "$helper" "$stage_wsl" "$VERSION" "$TZ_NAME" | tr -d '\r' | tail -1)
+	tarball=$(MSYS_NO_PATHCONV=1 wsl.exe -d "$WSL_DISTRO" -- bash "$helper" "$stage_wsl" "$VERSION" "$TZ_NAME" "$ARCH" | tr -d '\r' | tail -1)
 	[ -n "$tarball" ] || { echo "WSL build failed" >&2; exit 1; }
 	if [ -n "$KEEP" ]; then
 		mkdir -p "$(dirname "$KEEP")"; cp "$(printf '%s' "$tarball" | tr '\\' '/')" "$KEEP"; echo "built: $KEEP"; exit 0
@@ -270,7 +328,7 @@ else
 	tar -czf - -C "$STAGE" . | "${SSH[@]}" "tar -xzf - -C $REMOTE/in"
 
 	echo "== building the rootfs on the device"
-	"${SSH[@]}" "sh $REMOTE/in/tools/mkrootfs.sh -i $REMOTE/in -o $OUT -w $REMOTE -V $VERSION -z $TZ_NAME"
+	"${SSH[@]}" "sh $REMOTE/in/tools/mkrootfs.sh -i $REMOTE/in -o $OUT -w $REMOTE -V $VERSION -z $TZ_NAME -a $ARCH"
 fi
 
 if [ -n "$INSTALL" ]; then

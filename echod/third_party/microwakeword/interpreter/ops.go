@@ -287,14 +287,14 @@ func opFullyConnected(interp *Interpreter, op model.Operator) error {
 
 	actMin, actMax := activationBounds(activation, outputZP)
 
+	// techo5: the inner product is dotInt8 (fast.go), straight from the int8 tensors with the zero
+	// point folded into the sum; the original loop is refFullyConnected in ops_ref_test.go.
+	in8, w8 := asInt8(inData), asInt8(weightData)
 	for b := 0; b < batch; b++ {
+		row := in8[b*inputSize : (b+1)*inputSize]
 		for oc := 0; oc < outputSize; oc++ {
 			acc := int32(getBias32(biasData, oc))
-			for ic := 0; ic < inputSize; ic++ {
-				inVal := int32(int8(inData[b*inputSize+ic])) - inputZP
-				wVal := int32(int8(weightData[oc*inputSize+ic]))
-				acc += inVal * wVal
-			}
+			acc += dotInt8(row, w8[oc*inputSize:], -inputZP)
 			acc = MultiplyByQuantizedMultiplier(acc, qmuls[oc])
 			acc += outputZP
 			if acc < actMin {

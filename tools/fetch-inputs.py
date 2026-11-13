@@ -3,6 +3,7 @@
 don't need this: they use the release.
 
     python3 tools/fetch-inputs.py --device show
+    python3 tools/fetch-inputs.py --device cronos            # the 2nd gen Show 5 robot build: aarch64 root
     python3 tools/fetch-inputs.py --device spot --out ../techo5-spot/inputs
     python3 tools/fetch-inputs.py --device dot --dot ../techo5-dot --out ../techo5-dot/inputs
 
@@ -15,6 +16,11 @@ What it fetches, over HTTPS from Alpine's CDN and GitHub:
                                            home_assistant, from fwartner/home-assistant-wakewords-collection
                                            (both from a pinned commit, each file pinned to a sha256)
   show, spot: apks/, apks312/             tools/linux/packages.txt; the wpa_supplicant 2.9 set from Alpine v3.12
+  cronos:                                 the Show's set, and with --arch aarch64 (cronos's default) also:
+              alpine-minirootfs-3.24.2-aarch64.tar.gz   the 64-bit root filesystem's base (pinned sha256)
+              apks312-aarch64/            the wpa_supplicant 2.9 set for it. The boot layer (rescue
+                                          initramfs, busybox.static) stays armv7, as on every Show:
+                                          the 64-bit kernel runs both
   spot:       apks/libgcc                 mkfs.ext4 needs it in the Spot's rescue initramfs
   dot:        apks-dot/, apks-bt-dot/,    techo5-dot's tools/linux/packages-rescue.txt, packages-bt.txt and
               apks-rootfs-dot/            packages-rootfs.txt (the last only unpacked into the root filesystem)
@@ -37,9 +43,23 @@ import tarfile
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from techo5lib import alpine, download, download_checked, fail, fetch, note, repo_root, run_main, step  # noqa: E402
+from techo5lib import (ALPINE_SHA256, ALPINE_URL, alpine, download, download_checked, fail, fetch, note,  # noqa: E402
+                       repo_root, run_main, step)
 
 MIRROR = 'https://dl-cdn.alpinelinux.org/alpine'
+
+# The root filesystem's architecture (--arch). armv7 is every board's; aarch64 is a 64-bit userspace for
+# a board whose kernel is 64-bit (cronos's 4.9 is: it has run the armv7 userspace through compat), with
+# the daemon built GOARCH=arm64 (tools/linux/deploy-rootfs.sh --arch aarch64). The armv7 base is
+# techo5lib's ALPINE_URL; the aarch64 one is the same Alpine release, pinned here.
+ROOTFS_ARCHES = ('armv7', 'aarch64')
+ALPINE_AARCH64_URL = '%s/v3.24/releases/aarch64/alpine-minirootfs-3.24.2-aarch64.tar.gz' % MIRROR
+ALPINE_AARCH64_SHA256 = '9bf70a7f18ea44094cbb5f70c58f9af129c8214745743db0e68e5502cc2ce773'
+# Boards whose kernel is 64-bit and so may take an aarch64 root, and the ones that take it by default.
+AARCH64_DEVICES = ('show', 'cronos')
+AARCH64_BY_DEFAULT = ('cronos',)
+# The Wi-Fi drivers need wpa_supplicant 2.9, which lives in Alpine 3.12 with its libraries.
+WPA_SET = re.compile(r'^(wpa_supplicant-2\.9|libssl1\.1|libcrypto1\.1|libnl3-3\.5)')
 MODELS = ('okay_nabu', 'hey_jarvis', 'hey_mycroft', 'alexa')
 
 # The models come from a commit, not from a branch: both repositories are other people's, and what
@@ -203,17 +223,43 @@ def get_apk(filename, dest, branch='v3.24', arch='armv7'):
     fail('%s is in neither main nor community of Alpine %s' % (name, branch))
 
 
-def get_list(path, dest, out_root):
+def list_packages(path):
     with open(path) as f:
         for line in f:
             a = line.split('#', 1)[0].strip()
-            if not a or a.startswith('busybox-static-'):
-                continue
-            # The Wi-Fi drivers need wpa_supplicant 2.9, which lives in Alpine 3.12 with its libraries.
-            if re.match(r'^(wpa_supplicant-2\.9|libssl1\.1|libcrypto1\.1|libnl3-3\.5)', a):
-                get_apk(a, os.path.join(out_root, 'apks312'), 'v3.12')
-            else:
-                get_apk(a, dest)
+            if a and not a.startswith('busybox-static-'):
+                yield a
+
+
+def get_list(path, dest, out_root):
+    for a in list_packages(path):
+        if WPA_SET.match(a):
+            get_apk(a, os.path.join(out_root, 'apks312'), 'v3.12')
+        else:
+            get_apk(a, dest)
+
+
+def rootfs_inputs(arch):
+    """What a root filesystem of this architecture is built from, beyond the boot layer's inputs: its
+    Alpine base, and the directory its wpa_supplicant 2.9 set goes in (mkrootfs.sh installs that set
+    into the root; deploy-rootfs.sh stages it from here)."""
+    if arch == 'aarch64':
+        return {'minirootfs_url': ALPINE_AARCH64_URL, 'minirootfs_sha256': ALPINE_AARCH64_SHA256,
+                'apks312': 'apks312-aarch64'}
+    return {'minirootfs_url': ALPINE_URL, 'minirootfs_sha256': ALPINE_SHA256, 'apks312': 'apks312'}
+
+
+def get_rootfs_arch(path, out_root, arch):
+    """The aarch64 root's own inputs: its base and its wpa_supplicant 2.9 set. armv7 has none beyond
+    what alpine() and get_list() fetch."""
+    if arch == 'armv7':
+        return
+    r = rootfs_inputs(arch)
+    download_checked(r['minirootfs_url'], os.path.join(out_root, r['minirootfs_url'].rsplit('/', 1)[-1]),
+                     r['minirootfs_sha256'])
+    for a in list_packages(path):
+        if WPA_SET.match(a):
+            get_apk(a, os.path.join(out_root, r['apks312']), 'v3.12', arch)
 
 
 def from_apk(apk, member, out):
@@ -224,13 +270,25 @@ def from_apk(apk, member, out):
     os.chmod(out, 0o755)
 
 
-def main():
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--device', choices=('show', 'spot', 'dot'), default='show')
+    ap.add_argument('--device', choices=('show', 'cronos', 'spot', 'dot'), default='show',
+                    help='cronos: the Show\'s inputs, with an aarch64 root by default')
+    ap.add_argument('--arch', choices=ROOTFS_ARCHES,
+                    help='the root filesystem\'s architecture (default aarch64 for cronos, else armv7)')
     ap.add_argument('--out', default=os.environ.get('TECHO5_INPUTS') or os.path.join(repo_root(), 'inputs'))
     ap.add_argument('--dot', default=os.path.join(os.path.dirname(repo_root()), 'techo5-dot'),
                     help='a techo5-dot checkout, for its package lists (default ../techo5-dot)')
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    if a.arch is None:
+        a.arch = 'aarch64' if a.device in AARCH64_BY_DEFAULT else 'armv7'
+    if a.arch == 'aarch64' and a.device not in AARCH64_DEVICES:
+        ap.error('--arch aarch64 needs a 64-bit kernel: --device %s' % ' or '.join(AARCH64_DEVICES))
+    return a
+
+
+def main():
+    a = parse_args()
     out = os.path.abspath(a.out)
     tmp = os.path.join(out, '.fetch')
     os.makedirs(tmp, exist_ok=True)
@@ -254,8 +312,12 @@ def main():
             with open(js, 'w') as f:
                 json.dump({'wake_word': phrase, 'model': '%s.tflite' % m, 'trained_languages': ['en']}, f, indent=2)
     step('packages for the %s' % a.device)
-    if a.device in ('show', 'spot'):
-        get_list(os.path.join(repo_root(), 'tools', 'linux', 'packages.txt'), os.path.join(out, 'apks'), out)
+    show_list = os.path.join(repo_root(), 'tools', 'linux', 'packages.txt')
+    if a.device in ('show', 'cronos', 'spot'):
+        get_list(show_list, os.path.join(out, 'apks'), out)
+    if a.arch != 'armv7':
+        step('the %s root filesystem\'s base and wpa_supplicant 2.9' % a.arch)
+        get_rootfs_arch(show_list, out, a.arch)
     if a.device == 'spot':
         get_apk('libgcc-15.2.0-r5.apk', os.path.join(out, 'apks'))
     if a.device == 'dot':

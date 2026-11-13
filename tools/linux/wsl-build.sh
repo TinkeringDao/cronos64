@@ -3,7 +3,7 @@
 # WSL disk, build the root filesystem there with mkrootfs.sh under QEMU user
 # emulation, and print the Windows path of the tarball.
 #
-#   wsl-build.sh <stage dir, WSL path> <version> <timezone>
+#   wsl-build.sh <stage dir, WSL path> <version> <timezone> [armv7|aarch64]
 #
 # Needs qemu-user-static + binfmt-support (apt), Alpine's static apk at
 # ~/apk/apk.static, and a user namespace with a subuid range (Ubuntu's default)
@@ -12,10 +12,17 @@
 set -euo pipefail
 # A file's mode comes from the repo, not from the host: Ubuntu's default umask (002) gave group write.
 umask 022
-STAGE=$1; VERSION=$2; TZNAME=$3
+STAGE=$1; VERSION=$2; TZNAME=$3; ARCH=${4:-armv7}
 W=${TECHO5_BUILD_DIR:-$HOME/techo5-build}
 APK=$HOME/apk/apk.static
-[ -e /proc/sys/fs/binfmt_misc/qemu-arm ] || { echo "wsl-build: no qemu-arm binfmt (apt install qemu-user-static binfmt-support)" >&2; exit 1; }
+# The packages' triggers run inside the root: an x86 host needs QEMU for the root's architecture.
+case "$ARCH" in
+armv7) emu=qemu-arm;;
+aarch64) emu=qemu-aarch64;;
+*) echo "wsl-build: the architecture is armv7 or aarch64, not $ARCH" >&2; exit 1;;
+esac
+[ "$ARCH" = aarch64 ] && [ "$(uname -m)" = aarch64 ] && emu=
+[ -z "$emu" ] || [ -e /proc/sys/fs/binfmt_misc/$emu ] || { echo "wsl-build: no $emu binfmt (apt install qemu-user-static binfmt-support)" >&2; exit 1; }
 [ -x "$APK" ] || { echo "wsl-build: no $APK" >&2; exit 1; }
 
 rm -rf "$W"
@@ -28,6 +35,6 @@ find "$W/in" -type f -name '*.sh' -exec sed -i 's/\r$//' {} +
 map=--map-auto
 command -v newuidmap >/dev/null || map=
 unshare -Ur $map sh "$W/in/tools/mkrootfs.sh" -i "$W/in" -o "$W/rootfs.tar.gz" -w "$W" \
-	-V "$VERSION" -z "$TZNAME" -a armv7 -A "$APK"
+	-V "$VERSION" -z "$TZNAME" -a "$ARCH" -A "$APK"
 # The path the caller copies from: a Windows path under WSL, a plain one on Linux.
 wslpath -w "$W/rootfs.tar.gz" 2>/dev/null || echo "$W/rootfs.tar.gz"

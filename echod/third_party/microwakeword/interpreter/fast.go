@@ -8,7 +8,8 @@ package interpreter
 //     filter and bias widened to int32) is worked out once per operator and kept in a plan;
 //   - the input is widened, zero point taken off, once per call instead of once per use;
 //   - Conv2D's inner loops are dot products over contiguous memory: with no dilation along the
-//     width, a filter row and the input it covers are both contiguous (fw, ic) runs;
+//     width, a filter row and the input it covers are both contiguous (fw, ic) runs, taken straight
+//     from the int8 tensors with the zero point folded into the sum (dotInt8: NEON on arm64);
 //   - DepthwiseConv2D accumulates all channels of a pixel at once, walking memory in order;
 //   - StridedSlice copies contiguous runs, worked out once, instead of element by element.
 //
@@ -17,6 +18,7 @@ package interpreter
 
 import (
 	"fmt"
+	"unsafe"
 
 	"github.com/zserge/microwakeword/model"
 )
@@ -46,29 +48,13 @@ func optInt(op model.Operator, name string, def int) int {
 	return def
 }
 
-// dot is the sum of x[i]*w[i]; w is at least as long as x.
-func dot(x, w []int32) int32 {
-	w = w[:len(x)]
-	var a0, a1, a2, a3 int32
-	i := 0
-	for ; i+4 <= len(x); i += 4 {
-		a0 += x[i] * w[i]
-		a1 += x[i+1] * w[i+1]
-		a2 += x[i+2] * w[i+2]
-		a3 += x[i+3] * w[i+3]
-	}
-	for ; i < len(x); i++ {
-		a0 += x[i] * w[i]
-	}
-	return a0 + a1 + a2 + a3
-}
-
 type convGeom struct {
 	batch, inH, inW, inC, outH, outW, outC, fH, fW int
 	strideH, strideW, dilH, dilW, padH, padW       int
 	inZP, outZP, actMin, actMax                    int32
 	qmuls                                          []QuantMultiplier
-	filt, bias, in32                               []int32
+	filt, bias, in32                               []int32 // filt and in32: depthwise only
+	filt8                                          []int8  // Conv2D's filter, as the model has it
 }
 
 func newConvGeom(interp *Interpreter, op model.Operator, depthwise bool) (*convGeom, error) {
@@ -126,17 +112,26 @@ func newConvGeom(interp *Interpreter, op model.Operator, depthwise bool) (*convG
 	g.actMin, g.actMax = activationBounds(optInt(op, "fused_activation", 0), g.outZP)
 
 	fd := interp.tensors[op.Inputs[1]].data
-	g.filt = make([]int32, len(fd))
-	for i, v := range fd {
-		g.filt[i] = int32(int8(v))
+	if depthwise {
+		g.filt = make([]int32, len(fd))
+		for i, v := range fd {
+			g.filt[i] = int32(int8(v))
+		}
+		g.in32 = make([]int32, g.batch*g.inH*g.inW*g.inC)
+	} else {
+		g.filt8 = append([]int8(nil), asInt8(fd)...)
 	}
 	bd := interp.tensors[op.Inputs[2]].data
 	g.bias = make([]int32, g.outC)
 	for c := range g.bias {
 		g.bias[c] = getBias32(bd, c)
 	}
-	g.in32 = make([]int32, g.batch*g.inH*g.inW*g.inC)
 	return g, nil
+}
+
+// asInt8 is a tensor's bytes as the int8 values they hold, without a copy.
+func asInt8(b []byte) []int8 {
+	return unsafe.Slice((*int8)(unsafe.Pointer(unsafe.SliceData(b))), len(b))
 }
 
 func (g *convGeom) widen(in []byte) {
@@ -165,9 +160,10 @@ func opConv2D(interp *Interpreter, op model.Operator) error {
 		return fmt.Errorf("CONV_2D: %w", err)
 	}
 	g := p.(*convGeom)
-	g.widen(interp.tensors[op.Inputs[0]].data)
+	x := asInt8(interp.tensors[op.Inputs[0]].data)
+	x = x[:g.batch*g.inH*g.inW*g.inC]
 	out := interp.tensors[op.Outputs[0]].data
-	x, filt := g.in32, g.filt
+	filt, xOff := g.filt8, -g.inZP
 	rowW := g.fW * g.inC
 	for b := 0; b < g.batch; b++ {
 		for oh := 0; oh < g.outH; oh++ {
@@ -193,7 +189,7 @@ func opConv2D(interp *Interpreter, op model.Operator) error {
 							if fw0 < fw1 {
 								n := (fw1 - fw0) * g.inC
 								s := rowIn + (iw0+fw0)*g.inC
-								acc += dot(x[s:s+n], filt[rowF+fw0*g.inC:])
+								acc += dotInt8(x[s:s+n], filt[rowF+fw0*g.inC:], xOff)
 							}
 							continue
 						}
@@ -203,7 +199,7 @@ func opConv2D(interp *Interpreter, op model.Operator) error {
 								continue
 							}
 							s := rowIn + iw*g.inC
-							acc += dot(x[s:s+g.inC], filt[rowF+fw*g.inC:])
+							acc += dotInt8(x[s:s+g.inC], filt[rowF+fw*g.inC:], xOff)
 						}
 					}
 					g.store(out, outOff+oc, acc, oc)

@@ -9,14 +9,19 @@
 # what makes `apk add bluez` possible later.
 #
 #   mkrootfs.sh -i <indir> -o <out.tar.gz> [-w <workdir>] [-V <version>] [-z <timezone>]
-#               [-a <arch>] [-A <apk binary>] [-W alpine]
+#               [-a|--arch armv7|aarch64] [-A <apk binary>] [-W alpine]
+#
+# -a/--arch: the root's architecture, armv7 (every board's) or aarch64 (a 64-bit userspace for a board
+# whose kernel is 64-bit: cronos; deploy-rootfs.sh --arch aarch64 stages the arm64 daemon for it). On a
+# host it is required for apk; on the device it defaults to apk's own, so a 64-bit root built on a unit
+# running the armv7 one needs it said.
 #
 # -W alpine: wpa_supplicant from the board's package list, not the pinned 2.9 set (a board on a
 # mainline kernel whose Wi-Fi works with Alpine's own; the Echos' needs 2.9). Without it the build
 # fails when inputs/apks312 is missing, as it always has.
 #
 # <indir> layout (what deploy-rootfs.sh stages):
-#   bin/techo5 bin/fbprobe bin/audioprobe bin/rebootto bin/btbridge  Go binaries, armv7
+#   bin/techo5 bin/fbprobe bin/audioprobe bin/rebootto bin/btbridge  Go binaries, of the root's architecture
 #   bin/techo5-aec                                         WebRTC echo canceller helper (C++, build-aec.sh), optional
 #   bin/techo5-librespot                                   Spotify Connect receiver (Rust, build-librespot.sh), optional
 #   bin/techo5-ffmpeg                                      the Show's video decoder (C, build-ffmpeg.sh), optional
@@ -49,13 +54,14 @@ while [ $# -gt 0 ]; do
 	-w) WORK=$2; shift 2;;
 	-V) VERSION=$2; shift 2;;
 	-z) TZNAME=$2; shift 2;;
-	-a) ARCH=$2; shift 2;;
+	-a | --arch) ARCH=$2; shift 2;;
 	-A) APK=$2; shift 2;;
 	-W) WPA=$2; shift 2;;
 	*) echo "mkrootfs: unknown argument $1" >&2; exit 1;;
 	esac
 done
-[ -n "$IN" ] && [ -n "$OUT" ] || { echo "usage: mkrootfs.sh -i indir -o out.tar.gz [-w workdir] [-V version] [-z timezone] [-a arch] [-A apk] [-W alpine]" >&2; exit 1; }
+[ -n "$IN" ] && [ -n "$OUT" ] || { echo "usage: mkrootfs.sh -i indir -o out.tar.gz [-w workdir] [-V version] [-z timezone] [-a|--arch armv7|aarch64] [-A apk] [-W alpine]" >&2; exit 1; }
+case "$ARCH" in '' | armv7 | aarch64) ;; *) echo "mkrootfs: --arch takes armv7 or aarch64, not $ARCH" >&2; exit 1;; esac
 case "$WPA" in '' | alpine) ;; *) echo "mkrootfs: -W takes alpine, not $WPA" >&2; exit 1;; esac
 # Every Echo image needs the pinned wpa_supplicant 2.9: without -W alpine a build that did not stage
 # it stops before it starts.

@@ -8,6 +8,7 @@ import (
 	"image"
 	"log/slog"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -682,7 +683,8 @@ func (c *Camera) Unwedge() {
 // as uint32 fields inside the argument struct, and a stack object behind such a field can move
 // when the stack grows without the field following it; heap objects do not move. Converting to
 // uintptr does not make an object escape, so it is forced here: escape analysis cannot see
-// through the call to a function variable.
+// through the call to a function variable. (The Spot's driver, camera_spot.go, which is 32-bit
+// only; camera.go pins with pinAddr instead.)
 func heapNew[T any]() *T {
 	p := new(T)
 	escape(unsafe.Pointer(p))
@@ -693,3 +695,12 @@ var escape = func(unsafe.Pointer) {}
 
 // ptr32 is the address of a heapNew object as the compat ioctl structures carry it.
 func ptr32[T any](p *T) uint32 { return uint32(uintptr(unsafe.Pointer(p))) }
+
+// pinAddr pins v (which puts it on the heap: Pin's argument escapes) and returns its address as an
+// ioctl argument struct carries a user pointer, uintptr wide whichever the ABI. The garbage collector
+// neither sees nor follows such a field, so the pin is what keeps v alive and where it is until the
+// caller's Unpin, after the ioctl has returned.
+func pinAddr[T any](p *runtime.Pinner, v *T) uintptr {
+	p.Pin(v)
+	return uintptr(unsafe.Pointer(v))
+}

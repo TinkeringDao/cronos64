@@ -24,6 +24,7 @@ func TestFastMatchesReference(t *testing.T) {
 	ref[model.OpConv2D] = refConv2D
 	ref[model.OpDepthwiseConv2D] = refDepthwiseConv2D
 	ref[model.OpStridedSlice] = refStridedSlice
+	ref[model.OpFullyConnected] = refFullyConnected
 
 	for _, path := range paths {
 		m, err := model.LoadFile(path)
