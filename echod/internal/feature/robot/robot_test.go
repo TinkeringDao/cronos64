@@ -354,3 +354,71 @@ func TestRobotActuateSeamEmitsBoundedPoses(t *testing.T) {
 		t.Fatalf("pose angles out of mechanical bounds: %+v", p)
 	}
 }
+
+func TestObserveTurnPreservesPhaseStartAcrossTicks(t *testing.T) {
+	now := time.Unix(1700000450, 0)
+	r := newForTest(testDeps{now: func() time.Time { return now }})
+
+	// Simulate repeated 16ms display ticks calling ObserveTurn("listening", 0, 0, t)
+	// before Snapshot(t). ListenPulse must modulate dynamically over time, not freeze at 0.475.
+	var minPulse, maxPulse float64 = 1, 0
+	for i := 0; i < 60; i++ {
+		ts := now.Add(time.Duration(i) * 16 * time.Millisecond)
+		r.ObserveTurn("listening", 0, 0, ts)
+		s := r.Snapshot(ts)
+		if s.ListenPulse < minPulse {
+			minPulse = s.ListenPulse
+		}
+		if s.ListenPulse > maxPulse {
+			maxPulse = s.ListenPulse
+		}
+	}
+	if maxPulse-minPulse < 0.20 {
+		t.Fatalf("ListenPulse stayed frozen across repeated ObserveTurn ticks: min=%v max=%v", minPulse, maxPulse)
+	}
+
+	// Same invariant for observePhase & fallback MouthOpen during replying with speechLevel=0.
+	baseReply := now.Add(2 * time.Second)
+	var minMouth, maxMouth float64 = 1, 0
+	for i := 0; i < 40; i++ {
+		ts := baseReply.Add(time.Duration(i) * 16 * time.Millisecond)
+		r.observePhase("replying", ts)
+		s := r.Snapshot(ts)
+		if s.MouthOpen < minMouth {
+			minMouth = s.MouthOpen
+		}
+		if s.MouthOpen > maxMouth {
+			maxMouth = s.MouthOpen
+		}
+	}
+	if maxMouth-minMouth < 0.30 {
+		t.Fatalf("MouthOpen fallback stayed frozen across repeated observePhase ticks: min=%v max=%v", minMouth, maxMouth)
+	}
+}
+
+func TestThermalSupervisionRecordsFailSafeOnWriteError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := thermal.DefaultCronosConfig()
+	// Empty thermal root -> fail-safe Degraded=true, LimitKHz=1050000;
+	// unwritable limit paths -> Guard.Step() returns non-nil write error alongside fail-safe snap.
+	cfg.ThermalRoot = filepath.Join(dir, "missing-thermal")
+	cfg.CpufreqLimitPath = filepath.Join(dir, "missing-proc", "cpufreq_limit")
+	cfg.FallbackScalingMaxPath = filepath.Join(dir, "missing-sys", "scaling_max_freq")
+	guard := thermal.New(cfg)
+
+	now := time.Unix(1700000480, 0)
+	r := newForTest(testDeps{
+		now:          func() time.Time { return now },
+		cronos:       func() bool { return true },
+		thermalGuard: guard,
+	})
+
+	r.stepThermal(now)
+	snap := r.Snapshot(now)
+	if !snap.ThermalDegraded {
+		t.Fatal("expected ThermalDegraded=true on fail-safe Guard.Step() even when writeLimit fails")
+	}
+	if got := r.thermalLimit.Get(); got != float32(cfg.FailSafeKHz) {
+		t.Fatalf("thermalLimit sensor = %v, want fail-safe %v", got, cfg.FailSafeKHz)
+	}
+}

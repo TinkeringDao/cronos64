@@ -5,6 +5,7 @@ package robot
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -133,7 +134,12 @@ type Robot struct {
 	dragLastX       int
 	dragLastY       int
 
-	thermalDegraded atomic.Bool
+	thermalDegraded     atomic.Bool
+	thermalMu           sync.Mutex
+	thermalSeen         bool
+	lastThermalKHz      int
+	lastThermalDegraded bool
+	lastThermalErr      string
 }
 
 type testDeps struct {
@@ -279,7 +285,9 @@ func (r *Robot) ObserveTurn(phase string, speechLevel, listenLevel float64, now 
 	r.phase = phase
 	r.speechLevel = clamp01(speechLevel)
 	r.listenLevel = clamp01(listenLevel)
-	r.turnAt = now
+	if phaseChanged || r.turnAt.IsZero() {
+		r.turnAt = now
+	}
 	if phaseChanged && phase != "listening" {
 		r.azOK = false
 	}
@@ -300,7 +308,9 @@ func (r *Robot) observePhase(phase string, now time.Time) {
 	r.mu.Lock()
 	phaseChanged := r.phase != phase
 	r.phase = phase
-	r.turnAt = now
+	if phaseChanged || r.turnAt.IsZero() {
+		r.turnAt = now
+	}
 	if phaseChanged {
 		if phase != "replying" && phase != "lingering" {
 			r.speechLevel = 0
@@ -472,14 +482,43 @@ func (r *Robot) stepThermal(now time.Time) {
 		return
 	}
 	snap, err := r.thermalGuard.Step()
-	if err != nil {
-		return
-	}
 	nominal := thermal.DefaultCronosConfig().OPPs[0]
 	degraded := snap.Degraded || (snap.LimitKHz > 0 && snap.LimitKHz < nominal)
-	r.thermalDegraded.Store(degraded)
-	if snap.LimitKHz > 0 {
-		r.thermalLimit.Set(float32(snap.LimitKHz))
+
+	hasLimitOrDegraded := snap.LimitKHz > 0 || snap.Degraded
+	if hasLimitOrDegraded {
+		r.thermalDegraded.Store(degraded)
+		if snap.LimitKHz > 0 {
+			r.thermalLimit.Set(float32(snap.LimitKHz))
+		}
+	}
+
+	var errStr string
+	if err != nil {
+		errStr = err.Error()
+	}
+
+	r.thermalMu.Lock()
+	stateChanged := hasLimitOrDegraded &&
+		(!r.thermalSeen || snap.LimitKHz != r.lastThermalKHz || degraded != r.lastThermalDegraded)
+	if hasLimitOrDegraded {
+		r.thermalSeen = true
+		r.lastThermalKHz = snap.LimitKHz
+		r.lastThermalDegraded = degraded
+	}
+	errChanged := errStr != r.lastThermalErr
+	r.lastThermalErr = errStr
+	r.thermalMu.Unlock()
+
+	if err != nil && errChanged {
+		slog.Warn("robot: thermal guard step failed", "err", err, "limit_khz", snap.LimitKHz, "degraded", degraded)
+	}
+	if stateChanged {
+		if degraded {
+			slog.Warn("robot: thermal OPP degraded", "limit_khz", snap.LimitKHz, "temp_mc", snap.TempMilliC, "degraded", degraded)
+		} else {
+			slog.Info("robot: thermal OPP updated", "limit_khz", snap.LimitKHz, "temp_mc", snap.TempMilliC, "degraded", degraded)
+		}
 	}
 }
 
