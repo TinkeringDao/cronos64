@@ -7,6 +7,7 @@ rewrites every one of them and writes a new boot image with the same header,
 ramdisk and command line.
 
     python3 patch-dtb.py boot.img out.img --delete /soc/spi@1100a000/spi@0 amzn,mic-downmix
+    python3 patch-dtb.py boot.img out.img --delete-node /reserved-memory/secure-carveout
 
 The first use: `amzn,mic-downmix` makes Amazon's SPI capture driver average the
 two microphone channels into both slots (amzn-mt-spi-pcm.c); without it the
@@ -43,18 +44,34 @@ def split_kernel(kernel):
     return gz, dtbs
 
 
-def edit(blob, deletes, sets):
+def find_node(dt, path):
+    """fdt raises ValueError for a path that is not there; a device tree without it is skipped."""
+    try:
+        return dt.get_node(path)
+    except ValueError:
+        return None
+
+
+def edit(blob, deletes, delete_nodes, sets):
     dt = fdt.parse_dtb(blob)
     changed = 0
+    for node_path in delete_nodes:
+        parent_path, _, child_name = node_path.rstrip("/").rpartition("/")
+        parent = find_node(dt, parent_path or "/")
+        if parent is None:
+            continue
+        if any(s.name == child_name for s in parent.nodes):
+            parent.remove_subnode(child_name)
+            changed += 1
     for path, prop in deletes:
-        node = dt.get_node(path)
+        node = find_node(dt, path)
         if node is None:
             continue
         if node.get_property(prop) is not None:
             node.remove_property(prop)
             changed += 1
     for path, prop, value in sets:
-        node = dt.get_node(path)
+        node = find_node(dt, path)
         if node is None:
             continue
         node.set_property(prop, value)
@@ -68,6 +85,8 @@ def main():
     ap.add_argument("boot_out")
     ap.add_argument("--delete", nargs=2, action="append", default=[], metavar=("NODE", "PROP"),
                     help="remove a property from a node, in every appended device tree")
+    ap.add_argument("--delete-node", action="append", default=[], metavar="NODE",
+                    help="remove a whole node (and its children), in every appended device tree")
     ap.add_argument("--set-u32", nargs=3, action="append", default=[], metavar=("NODE", "PROP", "VALUE"),
                     help="set a 32-bit property")
     a = ap.parse_args()
@@ -79,7 +98,7 @@ def main():
         sets = [(n, p, int(v, 0)) for n, p, v in a.set_u32]
         out, total = [], 0
         for i, blob in enumerate(dtbs):
-            new, changed = edit(blob, a.delete, sets)
+            new, changed = edit(blob, a.delete, a.delete_node, sets)
             total += changed
             out.append(new)
         if total == 0:
@@ -98,7 +117,7 @@ def main():
     out = []
     total = 0
     for i, blob in enumerate(dtbs):
-        new, changed = edit(blob, a.delete, sets)
+        new, changed = edit(blob, a.delete, a.delete_node, sets)
         total += changed
         print(f"dtb {i}: {len(blob)} -> {len(new)} bytes, {changed} change(s)")
         out.append(new)

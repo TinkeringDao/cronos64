@@ -164,6 +164,9 @@ if grep -q 'amazon,cronos' /proc/device-tree/compatible 2>/dev/null &&
 	echo 10000 > /sys/devices/system/cpu/cpufreq/policy0/schedutil/rate_limit_us ||
 		log "cpufreq: schedutil rate limit not set"
 fi
+# The 2nd gen Show 5 on the LineageOS 4.9 kernel (amazon,cronos): ZRAM swap, the eMMC scheduler and the
+# interactive governor's tunables (/lib/techo5-unthrottle.sh gates on the board itself).
+if [ -r /lib/techo5-unthrottle.sh ]; then . /lib/techo5-unthrottle.sh; t5_cronos_unthrottle; fi
 # The 2nd gen Show 8 on mainline (mtk-cpufreq): ondemand with up_threshold 80 on both clusters, in
 # place of schedutil. Idle on the clock, 10 minutes each, back to back: the same temperature (36.9
 # against 36.9-37.2 °C), but the wake word took 0.8 ms a frame with a worst of 4 ms, against 1.4 ms
