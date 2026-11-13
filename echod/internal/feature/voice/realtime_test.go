@@ -170,9 +170,6 @@ func frame(n int) []byte { return make([]byte, 2*n) }
 
 func TestARealtimeTurn(t *testing.T) {
 	g := newRTRig(t)
-	if !g.r.Ready() {
-		t.Fatal("not ready")
-	}
 	_ = g.r.Start("")
 	_ = g.r.Audio(frame(320)) // said while the session opens: kept, and sent once it is open
 	s := g.waitDial(t)
@@ -369,6 +366,9 @@ func TestRealtimeDailyCap(t *testing.T) {
 	if g.r.Ready() {
 		t.Fatal("ready with no minutes left")
 	}
+	if rc := config.Get().Realtime; rc.SecondsLeft(now) > 0 {
+		t.Fatal("the day's minutes are not used up")
+	}
 	config.Use(filepath.Join(t.TempDir(), "fresh.json"))
 	_ = config.Set().Realtime().Set("openai", "", "", "", 0)
 	_ = config.Set().Realtime().SetKey("sk-test")
@@ -556,4 +556,18 @@ func TestAStartForAStoppedTurnOpensNothing(t *testing.T) {
 	// The next turn's start opens one.
 	_ = g.r.startFrom(g.r.generation())
 	g.waitDial(t)
+}
+
+// Cloud speech-to-speech is not part of this build: with a key set and minutes left, it is still not ready.
+func TestRealtimeDisabledInLocalOnlyBuild(t *testing.T) {
+	config.Use(filepath.Join(t.TempDir(), "state.json"))
+	_ = config.Set().Realtime().Set("openai", "", "", "", 0)
+	_ = config.Set().Realtime().SetKey("sk-test")
+	_ = config.Set().Realtime().SetMCPToken("ha-token")
+	if !config.Get().Realtime.Ready() {
+		t.Fatal("the configuration under test is not a ready one")
+	}
+	if newRealtime(func(event) {}).Ready() {
+		t.Fatal("cloud realtime is ready in a local-only build")
+	}
 }

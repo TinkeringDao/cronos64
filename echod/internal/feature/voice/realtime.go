@@ -164,11 +164,10 @@ func newRealtime(post func(event)) *rtBackend {
 
 func (r *rtBackend) Name() string { return "realtime" }
 
-// Ready is whether realtime voice is set up, and has minutes left today.
-func (r *rtBackend) Ready() bool {
-	rc := config.Get().Realtime
-	return rc.Ready() && rc.SecondsLeft(r.now()) > 0
-}
+// Ready is never true in this build: cloud speech-to-speech sends the microphone to a provider on the
+// internet, and a local-only device keeps its audio on the LAN. The configuration is read and kept as
+// it was, but nothing answers by realtime voice.
+func (r *rtBackend) Ready() bool { return false }
 
 // Start opens a turn: a session of its own, opened meanwhile, with what is said until it is open kept to
 // send then.

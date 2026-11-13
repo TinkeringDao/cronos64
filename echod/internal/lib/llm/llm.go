@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/HuskerMinion/techo5/echod/internal/lib/netguard"
 )
 
 // Message is one entry in the conversation.
@@ -62,6 +64,19 @@ var noReasoning sync.Map
 // timeout is how long one answer may take: a model on a slow machine thinks for a while, but a voice
 // turn nobody answers for this long is over.
 const timeout = 60 * time.Second
+
+// localClient is the client for a Client with none of its own. It dials through netguard.LocalOnlyDialer,
+// which checks the address actually connected to (after DNS and after each redirect), so a model on the
+// internet is out of reach whatever its name: only a LAN or overlay-mesh server answers. No proxy.
+var localClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:               nil,
+		DialContext:         netguard.LocalOnlyDialer(10 * time.Second).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+		MaxIdleConnsPerHost: 1,
+		IdleConnTimeout:     30 * time.Second,
+	},
+}
 
 // maxAnswer bounds what is read back.
 const maxAnswer = 1 << 20
@@ -146,7 +161,7 @@ func (c *Client) post(ctx context.Context, req map[string]any) (Message, int, er
 	}
 	hc := c.HTTP
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = localClient
 	}
 	resp, err := hc.Do(r)
 	if err != nil {

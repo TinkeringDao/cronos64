@@ -462,52 +462,34 @@ func TestARealtimeWordIsNotHomeAssistants(t *testing.T) {
 	}
 }
 
-// With a let-go Home Assistant run still to close, a realtime turn's own end ends it: it is not taken for
-// the old run's.
-func TestARealtimeTurnsEndIsNotTheOldRuns(t *testing.T) {
+// This build has no cloud realtime voice: a wake chosen for it, with realtime configured, opens no turn at
+// all (and so there is no realtime turn for a let-go Home Assistant run's end to be taken for).
+func TestARealtimeWakeOpensNoTurnInLocalOnlyBuild(t *testing.T) {
 	w := newWatcher(t, config.OnHA{})
 	_ = config.Set().Wake(0).Realtime(true)
 	_ = config.Set().Realtime().Set("openai", "", "", "", 0)
 	_ = config.Set().Realtime().SetKey("sk-test")
-	w.realtime.dial = func(context.Context, realtime.Config) (rtSession, error) { return nil, errors.New("not here") }
+	dialed := false
+	w.realtime.dial = func(context.Context, realtime.Config) (rtSession, error) {
+		dialed = true
+		return nil, errors.New("not here")
+	}
 	w.handle(event{kind: evStart, slot: 0, woke: true, at: w.at})
-	if w.phase != phaseListening || !w.stopsAtOnce() {
-		t.Fatalf("the realtime turn did not open: %s", w.phase)
-	}
-	w.staleRun = true
-	w.handle(event{kind: evRunEnd})
 	if w.phase == phaseListening {
-		t.Fatal("the realtime turn's end was swallowed as the old run's")
+		t.Fatal("a realtime turn opened in a local-only build")
 	}
-	if !w.staleRun {
-		t.Error("the old run is still to close, and is not waited for any more")
+	if dialed {
+		t.Fatal("a cloud realtime session was dialed in a local-only build")
 	}
 }
 
-// Realtime voice's listening is ended by the device whatever End of speech on the device says, a turn
-// that reaches its listening limit is answered rather than failed, and a Home Assistant question does
-// not open a follow-up on it.
-func TestARealtimeTurnAlwaysEndsListening(t *testing.T) {
+// Realtime voice's listening is ended by the device whatever End of speech on the device says; that is the
+// rule for the backend, and it holds in this build too even though no realtime turn opens.
+func TestARealtimeBackendAlwaysEndsListeningItself(t *testing.T) {
 	w := newWatcher(t, config.OnHA{})
 	_ = config.Set().Microphone().DeviceEnds(false)
-	_ = config.Set().Wake(0).Realtime(true)
-	_ = config.Set().Realtime().Set("openai", "", "", "", 0)
-	_ = config.Set().Realtime().SetKey("sk-test")
-	w.realtime.dial = func(context.Context, realtime.Config) (rtSession, error) { return nil, errors.New("not here") }
 	if !deviceEnds(w.realtime, true) || !deviceEnds(w.direct, true) || deviceEnds(w.ha, false) {
 		t.Fatal("who ends listening")
-	}
-	w.handle(event{kind: evStart, slot: 0, woke: true, at: w.at})
-	if w.phase != phaseListening {
-		t.Fatalf("the realtime turn did not open: %s", w.phase)
-	}
-	w.handle(event{kind: evContinue})
-	if w.pending != nil {
-		t.Error("a follow-up was set for realtime voice")
-	}
-	w.handle(event{kind: evTimeout})
-	if w.phase != phaseThinking {
-		t.Fatalf("at the listening limit: %s, want thinking", w.phase)
 	}
 }
 

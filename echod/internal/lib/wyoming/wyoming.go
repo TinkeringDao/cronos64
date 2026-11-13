@@ -18,6 +18,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/HuskerMinion/techo5/echod/internal/lib/netguard"
 )
 
 // Format is raw PCM: samples a second, bytes a sample, channels.
@@ -50,8 +52,8 @@ type conn struct {
 }
 
 func dial(ctx context.Context, addr string) (*conn, error) {
-	d := net.Dialer{Timeout: dialTimeout}
-	c, err := d.DialContext(ctx, "tcp", addr)
+	// Local only: a speech server answers from the LAN or an overlay mesh, never from the internet.
+	c, err := netguard.LocalOnlyDialer(dialTimeout).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

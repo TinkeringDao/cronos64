@@ -88,3 +88,25 @@ func TestFetchNeedsTheSignatureAndTheClock(t *testing.T) {
 		t.Errorf("fetched on an unset clock: %v", err)
 	}
 }
+
+// This fork signs its releases with its own key: the upstream key must not be trusted, and the one
+// built in must be a usable ed25519 public key.
+func TestReleaseKeyIsThisForksOwn(t *testing.T) {
+	const upstream = "KVUuQUbhyKwPBbIneqFEvXYSI+3Hkfu/heCTy5YNVMk="
+	if releaseKey == upstream {
+		t.Fatal("the upstream release key is still trusted")
+	}
+	raw, err := base64.StdEncoding.DecodeString(releaseKey)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		t.Fatalf("releaseKey is not a base64 ed25519 public key: %v (%d bytes)", err, len(raw))
+	}
+	seed, _ := testKey(t)
+	manifest := []byte(`{"version":"1.0.0"}`)
+	sig, err := Sign(manifest, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verify(manifest, []byte(sig), releaseKey); err == nil {
+		t.Fatal("a manifest signed by an unrelated key passed against the built-in release key")
+	}
+}
