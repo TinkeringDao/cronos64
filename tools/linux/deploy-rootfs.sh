@@ -3,6 +3,7 @@
 # either keep the tarball (--out) or send it to a unit and optionally install it into the inactive slot.
 #
 #   tools/linux/deploy-rootfs.sh --out rootfs.tar.gz [--version vX.Y.Z]            build here, keep the file
+#   tools/linux/deploy-rootfs.sh --stage-only [--arch aarch64] [--version vX.Y.Z]   stage binaries/inputs, stop before mkrootfs
 #   HOST=<unit> tools/linux/deploy-rootfs.sh [--install] [--reboot] [--version vX.Y.Z] [--on-device]
 #   tools/linux/deploy-rootfs.sh ... [--arch armv7|aarch64]    the root's architecture (below)
 #   tools/linux/deploy-rootfs.sh [--arch ...] --print-arch     say what would be built, and stop
@@ -53,12 +54,13 @@ DEVICE_OVERLAY=${DEVICE_OVERLAY:-}
 # Skylight's is tools/linux/skylight/kernel/build.sh's boot-skylight.img, and goes to recovery as it is.
 # Without it the rootfs leaves the unit's kernel as it is.
 KERNEL_IMAGE=${KERNEL_IMAGE:-}
-INSTALL=; REBOOT=; ONDEVICE=; KEEP=; ARCH=; PRINT_ARCH=
+INSTALL=; REBOOT=; ONDEVICE=; KEEP=; STAGE_ONLY=; ARCH=; PRINT_ARCH=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--arch) ARCH=$2; shift 2;;
 	--print-arch) PRINT_ARCH=1; shift;;
 	--out) KEEP=$2; shift 2;;
+	--stage-only) STAGE_ONLY=1; shift;;
 	--install) INSTALL=1; shift;;
 	--reboot) REBOOT=1; shift;;
 	--version) VERSION=$2; shift 2;;
@@ -83,11 +85,11 @@ if [ -n "$PRINT_ARCH" ]; then
 	exit 0
 fi
 
-[ -n "$HOST" ] || [ -n "$KEEP" ] || { echo "HOST is not set: HOST=<the device's address> $0 ..., or $0 --out rootfs.tar.gz" >&2; exit 1; }
-[ -z "$KEEP" ] || [ -z "$ONDEVICE" ] || { echo "--out builds on this computer; it does not go with --on-device" >&2; exit 1; }
-# A tarball kept with --out is one to publish or install from: without the wake word models, a unit
+[ -n "$HOST" ] || [ -n "$KEEP" ] || [ -n "$STAGE_ONLY" ] || { echo "HOST is not set: HOST=<the device's address> $0 ..., or $0 --out rootfs.tar.gz" >&2; exit 1; }
+[ -z "$KEEP$STAGE_ONLY" ] || [ -z "$ONDEVICE" ] || { echo "--out/--stage-only builds on this computer; it does not go with --on-device" >&2; exit 1; }
+# A tarball kept with --out (or staged with --stage-only) is one to publish or install from: without the wake word models, a unit
 # that starts from it answers to no word at all. Sending a build to a unit of one's own may skip them.
-if [ -n "$KEEP" ] && ! ls "$INPUTS"/models/*.tflite >/dev/null 2>&1; then
+if [ -n "$KEEP$STAGE_ONLY" ] && ! ls "$INPUTS"/models/*.tflite >/dev/null 2>&1; then
 	echo "no wake word models in $INPUTS/models: fetch them (tools/fetch-inputs.py) before building a rootfs with --out" >&2
 	exit 1
 fi
@@ -136,18 +138,18 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/tools" "$STAGE/overlay" "$STAGE/inputs/apks312"
 cp "$ROOT/bin/echod-$SFX" "$STAGE/bin/techo5"
 for c in fbprobe audioprobe rebootto btbridge; do cp "$ROOT/bin/$c-$SFX" "$STAGE/bin/$c"; done
-# helper64 <name>: a helper for the aarch64 root (see the top): bin/<name>-arm64, else a static
+# helper64 <name>: a helper for the aarch64 root: bin/<name>-arm64 (static or musl), else a static
 # bin/<name>-arm, else none, said.
 helper64() {
 	local f
 	for f in "$ROOT/bin/$1-arm64" "$ROOT/bin/$1-arm"; do
 		[ -e "$f" ] || continue
-		if is_static "$f" && { elf_is "$f" 02 183 || elf_is "$f" 01 40; }; then
+		if { elf_is "$f" 02 183 && ! grep -q 'ld-linux-' "$f"; } || { elf_is "$f" 01 40 && is_static "$f"; }; then
 			cp "$f" "$STAGE/bin/$1"
 			echo "== $1 ($(basename "$f")): sha256 $(sha256sum "$f" | cut -d' ' -f1)"
 			return 0
 		fi
-		echo "== $1: $(basename "$f") is not a static ARM binary, so it cannot run in an aarch64 root"
+		echo "== $1: $(basename "$f") is not a compatible aarch64 or static armv7 binary, so it cannot run in an aarch64 root"
 	done
 	echo "== warning: no bin/$1-arm64 (or static bin/$1-arm): the aarch64 image goes without $1" >&2
 }
@@ -274,6 +276,11 @@ if [ -n "$KERNEL_IMAGE" ]; then
 	sum=$(sha256sum "$KERNEL_IMAGE" | cut -d' ' -f1)
 	echo "$sum  boot-$kboard.img" > "$STAGE/overlay/usr/share/techo5/kernel/boot-$kboard.img.sha256"
 	echo "== kernel: sha256 $sum"
+fi
+
+if [ -n "$STAGE_ONLY" ]; then
+	echo "staged: $STAGE"
+	exit 0
 fi
 
 OUT=/data/techo5-linux/techo5-rootfs-$VERSION.tar.gz

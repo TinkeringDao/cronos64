@@ -393,6 +393,37 @@ class VerifyCronosBackupTest(unittest.TestCase):
             self.assertIn("error:", res.stderr.lower())
             self.assertNotIn("Traceback", res.stderr)
 
+    def test_fireos_4_9_77_rejected_by_default_and_accepted_with_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bdir = build_backup_dir(
+                Path(tmp) / "fireos_kver",
+                kernel_banner=b"Linux version 4.9.77+ (amazon@builder) #1 SMP PREEMPT",
+            )
+            default_res = run_cli(bdir)
+            self.assertNotEqual(default_res.returncode, 0)
+            self.assertIn("4.9.337", default_res.stderr)
+
+            flag_res = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--allow-fireos-kernel", str(bdir)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(flag_res.returncode, 0, msg=flag_res.stderr)
+
+            other_bdir = build_backup_dir(
+                Path(tmp) / "wrong_major_kver",
+                kernel_banner=b"Linux version 5.10.198 (builder@local)",
+            )
+            bad_flag_res = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--allow-fireos-kernel", str(other_bdir)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(bad_flag_res.returncode, 0)
+            self.assertIn("4.9.", bad_flag_res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

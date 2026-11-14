@@ -18,6 +18,7 @@ import zlib
 
 REQUIRED_PARTITIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15)
 REQUIRED_KERNEL_BANNER = b"Linux version 4.9.337"
+FIREOS_KERNEL_BANNER = b"Linux version 4.9."
 ANDROID_BOOT_MAGIC = b"ANDROID!"
 
 PART_FILE_RE = re.compile(r"^p(\d+)(?:-[^/]+)?\.img$")
@@ -95,7 +96,7 @@ def _extract_bootimg_kernel(p9_name: str, data: bytes) -> bytes:
     return data[page_size : page_size + kernel_size]
 
 
-def verify_boot_image(p9_path: Path) -> None:
+def verify_boot_image(p9_path: Path, *, allow_fireos_kernel: bool = False) -> None:
     data = p9_path.read_bytes()
     if not data.startswith(ANDROID_BOOT_MAGIC):
         raise BackupVerificationError(
@@ -103,20 +104,21 @@ def verify_boot_image(p9_path: Path) -> None:
         )
 
     kernel_blob = _extract_bootimg_kernel(p9_path.name, data)
+    banner = FIREOS_KERNEL_BANNER if allow_fireos_kernel else REQUIRED_KERNEL_BANNER
 
-    if REQUIRED_KERNEL_BANNER in kernel_blob:
+    if banner in kernel_blob:
         return
-    if _try_decompress_contains(kernel_blob, 16 + zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+    if _try_decompress_contains(kernel_blob, 16 + zlib.MAX_WBITS, banner):
         return
-    if _try_decompress_contains(kernel_blob, zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+    if _try_decompress_contains(kernel_blob, zlib.MAX_WBITS, banner):
         return
-    if _scan_stream_contains(kernel_blob, GZIP_SIGNATURES, 16 + zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+    if _scan_stream_contains(kernel_blob, GZIP_SIGNATURES, 16 + zlib.MAX_WBITS, banner):
         return
-    if _scan_stream_contains(kernel_blob, ZLIB_SIGNATURES, zlib.MAX_WBITS, REQUIRED_KERNEL_BANNER):
+    if _scan_stream_contains(kernel_blob, ZLIB_SIGNATURES, zlib.MAX_WBITS, banner):
         return
 
     raise BackupVerificationError(
-        f"{p9_path.name} (p9 boot): kernel payload missing '{REQUIRED_KERNEL_BANNER.decode('ascii')}'"
+        f"{p9_path.name} (p9 boot): kernel payload missing '{banner.decode('ascii')}'"
     )
 
 
@@ -227,15 +229,15 @@ def _write_sha256sums_atomic(sums_path: Path, lines: list[str]) -> None:
         raise
 
 
-def verify_backup(backup_dir: str | Path) -> dict[str, object]:
+def verify_backup(backup_dir: str | Path, *, allow_fireos_kernel: bool = False) -> dict[str, object]:
     root = Path(backup_dir)
     if not root.is_dir():
         raise BackupVerificationError(f"backup directory does not exist: {root}")
 
     parts, boots = _discover_slot_files(root)
 
-    # Validate Android boot image (p9) header, bounds, and 4.9.337 kernel payload.
-    verify_boot_image(parts[9])
+    # Validate Android boot image (p9) header, bounds, and Linux 4.9.x kernel payload.
+    verify_boot_image(parts[9], allow_fireos_kernel=allow_fireos_kernel)
 
     sums_path = root / "SHA256SUMS"
     raw_lines, entries = _parse_sha256sums(sums_path)
@@ -288,10 +290,15 @@ def main(argv: list[str] | None = None) -> int:
         description="Verify Cronos partition backup completeness, p3/p9 integrity, and SHA256SUMS."
     )
     parser.add_argument("backup_dir", help="Path to backup directory (e.g. backups/<serial>/partitions)")
+    parser.add_argument(
+        "--allow-fireos-kernel",
+        action="store_true",
+        help="Accept any Linux 4.9.x kernel banner in p9 (for stock Fire OS dumps taken before LineageOS).",
+    )
     args = parser.parse_args(argv)
 
     try:
-        res = verify_backup(args.backup_dir)
+        res = verify_backup(args.backup_dir, allow_fireos_kernel=args.allow_fireos_kernel)
     except BackupVerificationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

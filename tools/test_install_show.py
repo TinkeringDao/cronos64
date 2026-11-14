@@ -12,7 +12,9 @@ import importlib.util
 import io
 import os
 import sys
+import tarfile
 import tempfile
+import types
 import time
 import types
 import unittest
@@ -396,7 +398,6 @@ class GiftInstall(unittest.TestCase):
         self.assertIn('authorized_keys', cmd)
 
 
-
 class LetHomeAssistantAdd(unittest.TestCase):
     run_main = GiftInstall.run_main
 
@@ -432,6 +433,100 @@ class LetHomeAssistantAdd(unittest.TestCase):
         lib.check_let_add_release(on, 'v%d.%d.%d' % (lib.LET_ADD_MIN_RELEASE[0] + 1, 0, 0))
         lib.check_let_add_release(on, None)       # images of one's own: a note, not a stop
         lib.check_let_add_release(off, older)     # without the switch any release will do
+
+
+def _make_rootfs_tarball(path, release_line=None):
+    with tarfile.open(path, 'w:gz') as tf:
+        if release_line is not None:
+            data = (release_line + '\n').encode('utf-8')
+            info = tarfile.TarInfo('./etc/techo5-release')
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+
+
+class LocalReleaseInputs(unittest.TestCase):
+    def test_both_local_skips_remote_release_and_reads_version(self):
+        with tempfile.TemporaryDirectory() as d:
+            boot_path = os.path.join(d, 'boot.img')
+            rootfs_path = os.path.join(d, 'rootfs.tar.gz')
+            with open(boot_path, 'wb') as fh:
+                fh.write(b'ANDROID!')
+            _make_rootfs_tarball(
+                rootfs_path,
+                'techo5 rootfs 0.0.0-dev.abc123 built 2026-11-14T00:00Z, daemon 0.0.0-dev.abc123',
+            )
+            args = types.SimpleNamespace(
+                boot=boot_path, rootfs=rootfs_path, release='latest', work=d
+            )
+            called = []
+
+            def fail_release(*_a, **_kw):
+                called.append(True)
+                raise AssertionError('Release should not be instantiated when both --boot and --rootfs are given')
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                version, got_rootfs, got_boot, dry_dir = inst.resolve_release_inputs(
+                    args, 'cronos', release_cls=fail_release
+                )
+            self.assertFalse(called)
+            self.assertEqual(version, '0.0.0-dev.abc123')
+            self.assertEqual(got_rootfs, os.path.abspath(rootfs_path))
+            self.assertEqual(got_boot, os.path.abspath(boot_path))
+            self.assertEqual(dry_dir, os.path.dirname(os.path.abspath(rootfs_path)))
+
+    def test_both_local_without_release_file_falls_back_to_local(self):
+        with tempfile.TemporaryDirectory() as d:
+            boot_path = os.path.join(d, 'boot.img')
+            rootfs_path = os.path.join(d, 'rootfs.tar.gz')
+            with open(boot_path, 'wb') as fh:
+                fh.write(b'ANDROID!')
+            _make_rootfs_tarball(rootfs_path, release_line=None)
+            args = types.SimpleNamespace(
+                boot=boot_path, rootfs=rootfs_path, release='latest', work=d
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                version, _, _, _ = inst.resolve_release_inputs(
+                    args, 'cronos', release_cls=lambda *_a: (_ for _ in ()).throw(AssertionError('unexpected'))
+                )
+            self.assertEqual(version, 'local')
+
+    def test_partial_local_calls_release_for_missing_artifact(self):
+        with tempfile.TemporaryDirectory() as d:
+            boot_path = os.path.join(d, 'boot.img')
+            rootfs_path = os.path.join(d, 'rootfs.tar.gz')
+            with open(boot_path, 'wb') as fh:
+                fh.write(b'ANDROID!')
+            _make_rootfs_tarball(rootfs_path, 'techo5 rootfs 0.0.0-dev.abc123')
+
+            class StubRel:
+                def __init__(self, repo, tag, work):
+                    self.version = 'v9.9.9'
+                    self.dir = os.path.join(work, 'rel')
+
+                def rootfs(self, arch):
+                    return '/dl/rootfs-' + arch + '.tar.gz'
+
+            # Only --boot given -> Release provides rootfs
+            args_boot = types.SimpleNamespace(boot=boot_path, rootfs=None, release='latest', work=d)
+            with contextlib.redirect_stdout(io.StringIO()):
+                v1, r1, b1, d1 = inst.resolve_release_inputs(args_boot, 'cronos', release_cls=StubRel)
+            self.assertEqual((v1, r1, b1), ('v9.9.9', '/dl/rootfs-arm.tar.gz', os.path.abspath(boot_path)))
+            self.assertTrue(d1.endswith('/rel'))
+
+            # Only --rootfs given -> Release + boot_fn provide boot
+            args_rootfs = types.SimpleNamespace(boot=None, rootfs=rootfs_path, release='latest', work=d)
+            with contextlib.redirect_stdout(io.StringIO()):
+                v2, r2, b2, _ = inst.resolve_release_inputs(
+                    args_rootfs, 'cronos', release_cls=StubRel, boot_fn=lambda rel, work, dev: '/dl/boot.img'
+                )
+            self.assertEqual((v2, r2, b2), ('v9.9.9', os.path.abspath(rootfs_path), '/dl/boot.img'))
+
+    def test_verify_cronos_partitions_fails_on_incomplete_backup(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(lib.Fail) as ctx:
+                inst.verify_cronos_partitions(d)
+            self.assertIn('p1', str(ctx.exception).lower())
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

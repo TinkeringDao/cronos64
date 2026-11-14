@@ -37,6 +37,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import sys
 import tarfile
@@ -287,6 +288,12 @@ def parse_args(argv=None):
     return a
 
 
+def host_apk_arch(machine=None):
+    """Alpine package architecture matching this machine (aarch64 or x86_64) for apk.static."""
+    m = (machine or platform.machine()).lower()
+    return 'aarch64' if m in ('aarch64', 'arm64') else 'x86_64'
+
+
 def main():
     a = parse_args()
     out = os.path.abspath(a.out)
@@ -297,7 +304,7 @@ def main():
     alpine(out)
     step('busybox.static, apk.static')
     from_apk(get_apk('busybox-static-1.37.0-r31.apk', tmp), 'bin/busybox.static', os.path.join(out, 'busybox.static'))
-    from_apk(get_apk('apk-tools-static-2.14.12-r0.apk', tmp, 'v3.22', 'x86_64'), 'sbin/apk.static', os.path.join(out, 'apk.static'))
+    from_apk(get_apk('apk-tools-static-2.14.12-r0.apk', tmp, 'v3.22', host_apk_arch()), 'sbin/apk.static', os.path.join(out, 'apk.static'))
     step('wake word models')
     os.makedirs(os.path.join(out, 'models'), exist_ok=True)
     for m in MODELS:

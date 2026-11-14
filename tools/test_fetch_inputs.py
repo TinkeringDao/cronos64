@@ -59,7 +59,7 @@ class RootfsInputs(unittest.TestCase):
 class MainPackageSelection(unittest.TestCase):
     """main() with every download recorded: what goes where for each architecture."""
 
-    def run_main(self, argv):
+    def run_main(self, argv, machine='x86_64'):
         calls = {'apk': [], 'checked': [], 'alpine': []}
 
         def get_apk(filename, dest, branch='v3.24', arch='armv7'):
@@ -79,6 +79,7 @@ class MainPackageSelection(unittest.TestCase):
                 mock.patch.object(fi, 'alpine', alpine), \
                 mock.patch.object(fi, 'from_apk', lambda *a: None), \
                 mock.patch.object(fi, 'step', lambda *a: None), \
+                mock.patch.object(fi.platform, 'machine', return_value=machine), \
                 mock.patch('builtins.print'), \
                 mock.patch.object(sys, 'argv', ['fetch-inputs.py'] + argv + ['--out', out]):
             fi.main()
@@ -107,6 +108,18 @@ class MainPackageSelection(unittest.TestCase):
         # Nothing else is fetched for aarch64: the initramfs packages are armv7.
         a64 = [x for x in c['apk'] if x[3] == 'aarch64']
         self.assertEqual(sorted(x[0] for x in a64), sorted(WPA_SET))
+
+    def test_arm64_host_fetches_aarch64_apk_static(self):
+        c = self.run_main(['--device', 'cronos'], machine='arm64')
+        self.assertIn(('apk-tools-static-2.14.12-r0.apk', '.fetch', 'v3.22', 'aarch64'), c['apk'])
+
+
+class HostApkArch(unittest.TestCase):
+    def test_host_apk_arch_mapping(self):
+        self.assertEqual(fi.host_apk_arch('arm64'), 'aarch64')
+        self.assertEqual(fi.host_apk_arch('aarch64'), 'aarch64')
+        self.assertEqual(fi.host_apk_arch('x86_64'), 'x86_64')
+        self.assertEqual(fi.host_apk_arch('AMD64'), 'x86_64')
 
 
 if __name__ == '__main__':

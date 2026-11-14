@@ -61,6 +61,7 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -94,6 +95,66 @@ BOARDS = {
     'checkers': 'Echo Show 5 1st gen',
     'crown': 'Echo Show 8 1st gen',
 }
+
+
+def local_rootfs_version(rootfs_path):
+    """Extracts the build version from a local rootfs tarball's etc/techo5-release, or 'local'."""
+    try:
+        with tarfile.open(rootfs_path, 'r:*') as tf:
+            for candidate in ('./etc/techo5-release', 'etc/techo5-release'):
+                try:
+                    member = tf.getmember(candidate)
+                except KeyError:
+                    continue
+                if member.isfile():
+                    raw = tf.extractfile(member).read().decode('utf-8', 'replace')
+                    m = re.match(r'^techo5 rootfs (\S+)', raw.strip())
+                    if m:
+                        return m.group(1)
+    except (OSError, tarfile.TarError):
+        pass
+    return 'local'
+
+
+def resolve_release_inputs(a, dev, release_cls=Release, boot_fn=None):
+    """Resolves (version, rootfs_path, boot_path, dry_dir), skipping remote Release when both are local."""
+    if boot_fn is None:
+        boot_fn = boot_image
+    if a.rootfs and a.boot:
+        if getattr(a, 'let_home_assistant_add', False):
+            check_let_add_release(a, None)
+        rootfs = os.path.abspath(a.rootfs)
+        boot = os.path.abspath(a.boot)
+        note('root filesystem: your own, %s' % rootfs)
+        note('boot image: your own, %s' % boot)
+        return local_rootfs_version(rootfs), rootfs, boot, os.path.dirname(rootfs)
+    rel = release_cls(REPO, a.release, a.work)
+    if getattr(a, 'let_home_assistant_add', False):
+        check_let_add_release(a, None if a.rootfs else rel.version)
+    if a.rootfs:
+        rootfs = os.path.abspath(a.rootfs)
+        note('root filesystem: your own, %s' % rootfs)
+    else:
+        rootfs = rel.rootfs('arm')
+        note('root filesystem %s checked against the signed manifest' % os.path.basename(rootfs))
+    if a.boot:
+        boot = os.path.abspath(a.boot)
+        note('boot image: your own, %s' % boot)
+    else:
+        boot = boot_fn(rel, a.work, dev)
+        note('boot image %s checked' % os.path.basename(boot))
+    return rel.version, rootfs, boot, rel.dir
+
+
+def verify_cronos_partitions(parts):
+    """Runs verify-cronos-backup.py --allow-fireos-kernel on a Cronos TWRP backup before any flash."""
+    verifier = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'verify-cronos-backup.py')
+    r = subprocess.run([sys.executable, verifier, '--allow-fireos-kernel', parts],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout).strip()
+        fail('partition backup check failed: %s' % (detail or parts))
+    note('partition backup verified: %s' % parts)
 
 
 def quote(s):
@@ -711,6 +772,8 @@ def main():
             note('dry run: the partitions are saved by the real run')
         else:
             note('%d partitions saved, each checked against its size: %s' % (save_partitions(adb, parts), parts))
+        if dev == 'cronos' and not a.dry_run:
+            verify_cronos_partitions(parts)
     elif os.path.exists(los_boot):
         note('LineageOS boot image already kept: %s' % los_boot)
     elif a.dry_run:
@@ -738,23 +801,9 @@ def main():
 
     # ------------------------------------------------------------------------------------ 3. release
     step('the release')
-    rel = Release(REPO, a.release, a.work)
-    version = rel.version
-    check_let_add_release(a, None if a.rootfs else rel.version)
-    if a.rootfs:
-        rootfs = os.path.abspath(a.rootfs)
-        note('root filesystem: your own, %s' % rootfs)
-    else:
-        rootfs = rel.rootfs('arm')
-        note('root filesystem %s checked against the signed manifest' % os.path.basename(rootfs))
-    if a.boot:
-        boot = os.path.abspath(a.boot)
-        note('boot image: your own, %s' % boot)
-    else:
-        boot = boot_image(rel, a.work, dev)
-        note('boot image %s checked' % os.path.basename(boot))
+    version, rootfs, boot, dry_dir = resolve_release_inputs(a, dev)
     if a.dry_run:
-        print('\nDry run: TECHO5 %s downloaded and checked in %s; nothing written to the unit.' % (version, rel.dir))
+        print('\nDry run: TECHO5 %s checked in %s; nothing written to the unit.' % (version, dry_dir))
         return
 
     if twrp:
