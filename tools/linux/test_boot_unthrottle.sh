@@ -72,4 +72,11 @@ t5_cronos_unthrottle
 [ ! -e "$SYS_ROOT/block/zram0/comp_algorithm" ] && [ ! -e "$T/calls" ]
 check gate.non-cronos $? 0
 
+# Gate: 4.9.337 cronos DTB reports mediatek,mt8163 in compatible and androidboot.product=cronos in cmdline.
+: > "$SYS_ROOT/block/zram0/comp_algorithm"
+printf 'mediatek,mt8163\0' > "$PROC_ROOT/device-tree/compatible"
+echo "console=tty0 androidboot.product=cronos techo5=linux" > "$PROC_ROOT/cmdline"
+t5_cronos_unthrottle
+check gate.cmdline-cronos.zram "$(cat "$SYS_ROOT/block/zram0/comp_algorithm")" lz4
+
 [ $fail -eq 0 ] && echo "PASS" || { echo "FAILED"; exit 1; }

@@ -299,12 +299,24 @@ def put_logo(adb, parts, board):
         os.remove(path)
         return sha256(got)
 
-    adb.push(LOGO_FILE, '/tmp/techo5-logo.bin')
-    if adb.sh('sha256sum /tmp/techo5-logo.bin').split(' ')[0] != LOGO_SHA:
+    b0 = at // 4096
+    b1 = (at + LOGO_SIZE + 4095) // 4096
+    patched = saved[:at] + logo + saved[at + LOGO_SIZE:]
+    blocks = patched[b0 * 4096:b1 * 4096]
+    blocks_sha = sha256(blocks)
+    blocks_path = expdb_backup + '.logo-blocks'
+    with open(blocks_path, 'wb') as f:
+        f.write(blocks)
+    try:
+        adb.push(blocks_path, '/tmp/techo5-logo.bin')
+    finally:
+        if os.path.exists(blocks_path):
+            os.remove(blocks_path)
+    if adb.sh('sha256sum /tmp/techo5-logo.bin').split(' ')[0] != blocks_sha:
         adb.sh('rm -f /tmp/techo5-logo.bin')
         return "kept Amazon's boot logo: the logo changed on its way to the unit"
-    adb.sh('dd if=/tmp/techo5-logo.bin of=%s bs=1 seek=%d count=%d conv=notrunc 2>/dev/null; sync; '
-           'rm -f /tmp/techo5-logo.bin' % (part, at, LOGO_SIZE))
+    adb.sh('dd if=/tmp/techo5-logo.bin of=%s bs=4096 seek=%d count=%d conv=notrunc 2>/dev/null; sync; '
+           'rm -f /tmp/techo5-logo.bin' % (part, b0, b1 - b0))
     if flash_kaeru() == k['logo']:
         return 'the TECHO5 boot logo written into expdb (p%d) and read back from the flash' % n
 
