@@ -894,10 +894,11 @@ func (c *conversation) turnEvent(e event) {
 			return
 		}
 
-		// Realtime voice is answered by what it was sent, and nobody else ends its listening: at the
-		// limit, what was heard is the question, as when the device hears the speaker stop.
-		if _, rt := c.be.(*rtBackend); rt && c.phase == phaseListening {
-			slog.Info("listened to the limit; asking realtime voice to answer what it heard", "slot", c.slot+1)
+		// Realtime voice and the direct companion brain are answered by what they were sent, and nobody
+		// else ends their listening: at the limit, what was heard is the question, as when the device
+		// hears the speaker stop.
+		if _, rt := c.be.(*rtBackend); (rt || (c.be == c.direct && c.direct != nil)) && c.phase == phaseListening {
+			slog.Info("listened to the limit; asking brain to answer what it heard", "slot", c.slot+1)
 			c.think()
 			return
 		}
