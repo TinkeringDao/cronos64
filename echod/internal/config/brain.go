@@ -55,6 +55,13 @@ type Brain struct {
 	// VisionModel the model to ask for when looking through the camera. Empty falls back to LLM and Model.
 	VLM         string `json:"vlm,omitempty"`
 	VisionModel string `json:"vision_model,omitempty"`
+
+	// Hindsight is an optional local memory service base URL, like http://10.0.0.22:8090/v1/default.
+	// HindsightBank is the read-only knowledge bank recalled on each turn (defaults to "reachy").
+	// HindsightWriteBank is the optional bank where turn summaries are retained asynchronously.
+	Hindsight          string `json:"hindsight,omitempty"`
+	HindsightBank      string `json:"memory_bank,omitempty"`
+	HindsightWriteBank string `json:"memory_write_bank,omitempty"`
 }
 
 // ValidReplyPlayer cleans up an entity id typed for Brain.ReplyPlayer and says whether it is one: empty
@@ -104,6 +111,27 @@ func (b Brain) EffectiveVisionModel() string {
 	return strings.TrimSpace(b.Model)
 }
 
+// EffectiveHindsight returns the trimmed Hindsight base URL without a trailing slash.
+func (b Brain) EffectiveHindsight() string {
+	return strings.TrimRight(strings.TrimSpace(b.Hindsight), "/")
+}
+
+// EffectiveHindsightBank returns HindsightBank when set, defaulting to "reachy" when Hindsight is configured.
+func (b Brain) EffectiveHindsightBank() string {
+	if bank := strings.TrimSpace(b.HindsightBank); bank != "" {
+		return bank
+	}
+	if b.EffectiveHindsight() != "" {
+		return "reachy"
+	}
+	return ""
+}
+
+// EffectiveHindsightWriteBank returns the trimmed async write bank name (e.g. "companion_turns").
+func (b Brain) EffectiveHindsightWriteBank() string {
+	return strings.TrimSpace(b.HindsightWriteBank)
+}
+
 type BrainWriter struct{ st *Store }
 
 // Set replaces everything but the key, which only SetKey changes: a form that shows the key as
@@ -111,9 +139,15 @@ type BrainWriter struct{ st *Store }
 func (w BrainWriter) Set(b Brain) error {
 	return w.st.Update(func(c *Config) {
 		key, player := c.Brain.Key, c.Brain.ReplyPlayer
+		hs, hsBank, hsWrite := c.Brain.Hindsight, c.Brain.HindsightBank, c.Brain.HindsightWriteBank
 		c.Brain = b
 		c.Brain.Key = key
 		c.Brain.ReplyPlayer = player
+		if c.Brain.Hindsight == "" && hs != "" {
+			c.Brain.Hindsight = hs
+			c.Brain.HindsightBank = hsBank
+			c.Brain.HindsightWriteBank = hsWrite
+		}
 	})
 }
 

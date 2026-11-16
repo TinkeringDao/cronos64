@@ -74,6 +74,8 @@ type Snapshot struct {
 	PetGlow         float64
 	Phase           string
 	ThermalDegraded bool
+	GazeLocked      bool
+	AudioLocked     bool
 }
 
 // Robot fuses companion sensors, touch interactions, thermal state, and the
@@ -85,6 +87,8 @@ type Robot struct {
 
 	gaze         *GazeTracker
 	thermalLimit *esphome.Sensor
+	gazeConfSens *esphome.Sensor
+	azimuthSens  *esphome.Sensor
 	actuate      *actuate.GuardedSender
 	poseCh       chan actuate.Pose
 	wake         chan struct{}
@@ -231,6 +235,27 @@ func newRobot(deps testDeps) *Robot {
 			StateClass: esphome.StateClassMeasurement,
 			Decimals:   0,
 		},
+		gazeConfSens: &esphome.Sensor{
+			Base: esphome.Base{
+				ObjectID: "gaze_confidence",
+				Name:     "Gaze Confidence",
+				Icon:     "mdi:eye-check",
+				Category: esphome.CategoryDiagnostic,
+			},
+			Unit:       "%",
+			StateClass: esphome.StateClassMeasurement,
+			Decimals:   0,
+		},
+		azimuthSens: &esphome.Sensor{
+			Base: esphome.Base{
+				ObjectID: "audio_azimuth",
+				Name:     "Audio Azimuth",
+				Icon:     "mdi:surround-sound",
+				Category: esphome.CategoryDiagnostic,
+			},
+			StateClass: esphome.StateClassMeasurement,
+			Decimals:   2,
+		},
 		actuate:      actuate.NewGuardedSender(actuate.NoopTransport{}),
 		poseCh:       make(chan actuate.Pose, 1),
 		wake:         make(chan struct{}, 1),
@@ -253,7 +278,7 @@ func (r *Robot) Name() string { return "robot" }
 
 // Entities implements component.Entities.
 func (r *Robot) Entities() []esphome.Entity {
-	return []esphome.Entity{r.thermalLimit}
+	return []esphome.Entity{r.thermalLimit, r.gazeConfSens, r.azimuthSens}
 }
 
 // SetTransport sets the downstream actuation transport used by the guarded seam.
@@ -334,14 +359,19 @@ func (r *Robot) ObserveAzimuth(azimuth, confidence float64, ok bool, now time.Ti
 	if !ok || math.IsNaN(azimuth) || math.IsInf(azimuth, 0) || math.IsNaN(confidence) || math.IsInf(confidence, 0) {
 		return
 	}
+	azClamped := clamp(azimuth, -1, 1)
+	confClamped := clamp01(confidence)
 	r.mu.Lock()
-	r.az = clamp(azimuth, -1, 1)
-	r.azConf = clamp01(confidence)
+	r.az = azClamped
+	r.azConf = confClamped
 	r.azOK = true
 	if r.azConf >= tdoaMinConf {
 		r.azAt = now
 	}
 	r.mu.Unlock()
+	if r.azimuthSens != nil && confClamped >= tdoaMinConf {
+		r.azimuthSens.Set(float32(azClamped))
+	}
 }
 
 // ObserveGaze records a gaze tracker sample directly (or from ProcessLuma).
@@ -353,6 +383,9 @@ func (r *Robot) ObserveGaze(sample GazeSample) {
 		r.lastGaze = sample
 	}
 	r.mu.Unlock()
+	if r.gazeConfSens != nil {
+		r.gazeConfSens.Set(float32(clamp01(sample.Confidence) * 100.0))
+	}
 }
 
 // Snapshot steps the critically damped attention spring to now, resolves mood/pulses,
@@ -381,6 +414,9 @@ func (r *Robot) Snapshot(now time.Time) Snapshot {
 		r.lookY = clamp(r.lookY, -1, 1)
 	}
 
+	gazeLocked := !r.lastGaze.At.IsZero() && r.lastGaze.Confidence >= gazeMinConf && now.Sub(r.lastGaze.At) <= gazeFreshWindow
+	audioLocked := r.azOK && r.azConf >= tdoaMinConf && !r.azAt.IsZero() && now.Sub(r.azAt) <= tdoaFreshWindow
+
 	mood := r.moodLocked(now)
 	mouthOpen := r.mouthOpenLocked(now, mood)
 	listenPulse := r.listenPulseLocked(now, mood)
@@ -403,6 +439,8 @@ func (r *Robot) Snapshot(now time.Time) Snapshot {
 		PetGlow:         petGlow,
 		Phase:           phase,
 		ThermalDegraded: r.thermalDegraded.Load(),
+		GazeLocked:      gazeLocked,
+		AudioLocked:     audioLocked,
 	}
 	r.emitPose(snap, running)
 	return snap
@@ -529,7 +567,7 @@ func (r *Robot) stepSupervision(now time.Time) {
 	listening := r.phase == "listening"
 	r.mu.Unlock()
 
-	if listening {
+	if listening || (viewed && !asleep && !r.isMuted()) {
 		if az, conf, ok := r.micAzimuth(); ok {
 			r.ObserveAzimuth(az, conf, true, now)
 		}
@@ -559,7 +597,7 @@ func (r *Robot) acquireCamera() {
 		}
 		now := r.now()
 		r.gazeMu.Lock()
-		sample := r.gaze.ProcessLuma(luma, w, h, 0, now)
+		sample := r.gaze.ProcessLuma(luma, w, h, 0.85, now)
 		r.gazeMu.Unlock()
 		if sample.Confidence > 0 {
 			r.ObserveGaze(sample)
@@ -602,6 +640,10 @@ func (r *Robot) targetLocked(now time.Time) (float64, float64) {
 	// (b) Fresh camera gaze estimate.
 	if !r.lastGaze.At.IsZero() && r.lastGaze.Confidence >= gazeMinConf && now.Sub(r.lastGaze.At) <= gazeFreshWindow {
 		return clamp(r.lastGaze.X, -1, 1), clamp(r.lastGaze.Y, -1, 1)
+	}
+	// (b2) Ambient acoustic localization when someone speaks or claps in the room.
+	if r.azOK && r.azConf >= tdoaMinConf && !r.azAt.IsZero() && now.Sub(r.azAt) <= tdoaFreshWindow {
+		return clamp(r.az, -1, 1), -0.04
 	}
 	// (c) Calm ambient wander.
 	sec := now.Sub(r.epochAt).Seconds()

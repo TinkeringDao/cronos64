@@ -39,16 +39,31 @@ func TestBrainEffectiveVLMAndVisionModel(t *testing.T) {
 	}
 
 	dedicated := Brain{
-		LLM:         "http://10.0.0.20:8080/v1",
-		Model:       "qwen2.5-7b",
-		VLM:         " http://10.0.0.21:8081/v1 ",
-		VisionModel: " qwen2.5-vl-3b ",
+		LLM:                "http://10.0.0.20:8080/v1",
+		Model:              "qwen2.5-7b",
+		VLM:                " http://10.0.0.21:8081/v1 ",
+		VisionModel:        " qwen2.5-vl-3b ",
+		Hindsight:          " http://10.0.0.22:8090/v1/default/ ",
+		HindsightBank:      " reachy ",
+		HindsightWriteBank: " companion_write ",
 	}
 	if got := dedicated.EffectiveVLM(); got != "http://10.0.0.21:8081/v1" {
 		t.Fatalf("dedicated EffectiveVLM() = %q, want trimmed VLM", got)
 	}
 	if got := dedicated.EffectiveVisionModel(); got != "qwen2.5-vl-3b" {
 		t.Fatalf("dedicated EffectiveVisionModel() = %q, want trimmed VisionModel", got)
+	}
+	if got := dedicated.EffectiveHindsight(); got != "http://10.0.0.22:8090/v1/default" {
+		t.Fatalf("dedicated EffectiveHindsight() = %q, want trimmed URL without trailing slash", got)
+	}
+	if got := dedicated.EffectiveHindsightBank(); got != "reachy" {
+		t.Fatalf("dedicated EffectiveHindsightBank() = %q, want reachy", got)
+	}
+	if got := (Brain{Hindsight: "http://10.0.0.22:8090/v1/default"}).EffectiveHindsightBank(); got != "reachy" {
+		t.Fatalf("default EffectiveHindsightBank() = %q, want reachy", got)
+	}
+	if got := dedicated.EffectiveHindsightWriteBank(); got != "companion_write" {
+		t.Fatalf("dedicated EffectiveHindsightWriteBank() = %q, want companion_write", got)
 	}
 }
 

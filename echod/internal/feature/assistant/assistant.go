@@ -74,7 +74,8 @@ func (a *Assistant) Think(ctx context.Context, heard string) (string, error) {
 	past := append([]llm.Message(nil), a.history...)
 	a.mu.Unlock()
 
-	msgs := append([]llm.Message{{Role: "system", Content: instructions(b, time.Now())}}, past...)
+	sysPrompt := instructions(b, time.Now()) + recallHindsightContext(ctx, b, heard)
+	msgs := append([]llm.Message{{Role: "system", Content: sysPrompt}}, past...)
 	user := llm.Message{Role: "user", Content: heard}
 	msgs = append(msgs, user)
 	added := []llm.Message{user}
@@ -91,7 +92,9 @@ func (a *Assistant) Think(ctx context.Context, heard string) (string, error) {
 		added = append(added, m)
 		if len(m.ToolCalls) == 0 {
 			a.remember(added, g.Read())
-			return spoken(m.Content), nil
+			ans := spoken(m.Content)
+			retainHindsightTurnAsync(b, heard, ans)
+			return ans, nil
 		}
 		for _, call := range m.ToolCalls {
 			if n := call.Function.Name; n == "web_search" || n == "read_page" {
@@ -113,7 +116,9 @@ func (a *Assistant) Think(ctx context.Context, heard string) (string, error) {
 	if m, err := c.Chat(ctx, msgs, nil); err == nil && strings.TrimSpace(m.Content) != "" {
 		added = append(added, m)
 		a.remember(added, g.Read())
-		return spoken(m.Content), nil
+		ans := spoken(m.Content)
+		retainHindsightTurnAsync(b, heard, ans)
+		return ans, nil
 	}
 	a.remember(added, g.Read())
 	return "Sorry, I got stuck on that one.", nil
@@ -153,7 +158,11 @@ func (a *Assistant) remember(added []llm.Message, read bool) {
 func instructions(b config.Brain, now time.Time) string {
 	name := config.Get().Device.Name
 	var s strings.Builder
-	fmt.Fprintf(&s, "You are the voice assistant of %q, a smart clock and speaker in someone's home. ", name)
+	if config.Get().Screen.IdleScreen == "robot" || b.EffectiveHindsight() != "" {
+		fmt.Fprintf(&s, "You are Reachy Mini (device name %q), a warm, curious, expressive desktop robot companion in someone's home, connected to the Hindsight memory bank. ", name)
+	} else {
+		fmt.Fprintf(&s, "You are the voice assistant of %q, a smart clock and speaker in someone's home. ", name)
+	}
 	fmt.Fprintf(&s, "The date and time right now are %s, %s, time zone %s: they are correct, so use them ", now.Format("Monday, January 2, 2006"), now.Format("3:04 PM"), now.Location())
 	s.WriteString("whenever the time or the date is asked for. The coming days are ")
 	var days []string
@@ -251,7 +260,7 @@ var allowedAfterStations = map[string]bool{"play_radio": true, "save_station": t
 // read_page goes only to a page a search found in the same turn (webTurn.check): an address the
 // web made up could carry what the turn has read (a calendar's events) out in its query.
 var allowedAfterWeb = map[string]bool{
-	"web_search": true, "read_page": true,
+	"web_search": true, "read_page": true, "hindsight_recall": true,
 	"list_timers": true, "list_alarms": true, "list_stations": true, "list_callees": true,
 	"find_radio": true, "calendar": true, "weather": true, "weather_elsewhere": true, "read_todo": true,
 }

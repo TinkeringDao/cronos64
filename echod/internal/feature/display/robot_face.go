@@ -479,11 +479,15 @@ func paintArticulatedReachy(r *renderer, cache *robotRenderCache, snap robot.Sna
 	mbx, mby := (bx0+bx1)*0.5, (by0+by1)*0.5
 	r.aaLine(mbx-2.4*g.sc*g.sinA, mby-4.8*g.sc*g.cosA, mbx+2.4*g.sc*g.sinA, mby+4.8*g.sc*g.cosA, 2.6*g.sc, darkInk)
 
-	// Center bridge optical sensor dot — pulses with syllabic voice luminance when talking or listening
-	if g.talkEnergy > 0.02 || g.listenLevel > 0.02 {
-		pulse := clamp01(g.talkEnergy*(0.65+0.35*math.Sin(tSec*14.0)) + g.listenLevel*0.75)
-		dotCol := lerp(color.RGBA{120, 95, 75, 255}, color.RGBA{255, 196, 110, 255}, pulse)
-		r.aaDisc(mbx, mby, (2.2+1.2*pulse)*g.sc, dotCol)
+	// Center bridge optical sensor dot — indicates live camera gaze lock (emerald-cyan) and voice/TDOA lock (warm amber)
+	if g.talkEnergy > 0.02 || g.listenLevel > 0.02 || snap.AudioLocked {
+		pulse := clamp01(g.talkEnergy*(0.65+0.35*math.Sin(tSec*14.0)) + g.listenLevel*0.75 + 0.45)
+		dotCol := lerp(color.RGBA{120, 95, 75, 255}, color.RGBA{255, 204, 102, 255}, pulse)
+		r.aaDisc(mbx, mby, (2.4+1.3*pulse)*g.sc, dotCol)
+	} else if snap.GazeLocked {
+		pulse := 0.55 + 0.45*math.Sin(tSec*5.0)
+		dotCol := lerp(color.RGBA{64, 155, 138, 255}, color.RGBA{96, 238, 204, 255}, pulse)
+		r.aaDisc(mbx, mby, (2.3+0.8*pulse)*g.sc, dotCol)
 	}
 
 	// Draw left (larger) and right (smaller) optical spectacle lenses with talking iris & eyelid micro-animations
