@@ -149,22 +149,33 @@ func (d *direct) answer(ctx context.Context, pcm []byte) {
 		d.post(event{kind: evContinue})
 	}
 
-	voice, f, err := wyoming.Synthesize(ctx, b.TTS, reply, b.Voice)
+	var firstAudioAt time.Duration
+	err = wyoming.SynthesizeStream(ctx, b.TTS, reply, b.Voice, func(samples []int16, f wyoming.Format) {
+		if ctx.Err() != nil || len(samples) == 0 {
+			return
+		}
+		if firstAudioAt == 0 {
+			firstAudioAt = time.Since(start)
+		}
+		voice := media.ToVoiceRate(samples, f.Rate)
+		out := make([]byte, 2*len(voice))
+		for i, s := range voice {
+			out[2*i], out[2*i+1] = byte(s), byte(s>>8)
+		}
+		d.post(event{kind: evStreamAudio, audio: out})
+	})
 	if err != nil {
 		fail("tts-failed", err)
 		return
 	}
-	slog.Info("direct turn answered", "heard_ms", heardAt.Milliseconds(), "thought_ms", thoughtAt.Milliseconds(),
+	slog.Info("direct turn answered",
+		"heard_ms", heardAt.Milliseconds(),
+		"thought_ms", thoughtAt.Milliseconds(),
+		"first_audio_ms", firstAudioAt.Milliseconds(),
 		"spoken_ms", time.Since(start).Milliseconds())
-	voice = media.ToVoiceRate(voice, f.Rate)
-	out := make([]byte, 2*len(voice))
-	for i, s := range voice {
-		out[2*i], out[2*i+1] = byte(s), byte(s>>8)
-	}
 	if ctx.Err() != nil {
 		return
 	}
-	d.post(event{kind: evStreamAudio, audio: out})
 	d.post(event{kind: evStreamEnd})
 	d.post(event{kind: evRunEnd})
 }

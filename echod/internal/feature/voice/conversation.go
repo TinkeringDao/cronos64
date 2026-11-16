@@ -951,9 +951,11 @@ func (c *conversation) start(n nextTurn) (started bool) {
 
 	// Saying the wake word while the device is still listening is part of the sentence, not a new
 	// request: acting on it would cut off what the user is in the middle of saying. Once it is
-	// thinking or speaking, a wake word is a deliberate interruption and takes the turn over.
-	if c.phase == phaseListening {
-		slog.Info("wake word ignored, still listening", "slot", slot+1)
+	// thinking or speaking, a wake word is a deliberate interruption and takes the turn over,
+	// except on a direct companion brain where background room conversation must not cancel an
+	// active thinking or speaking turn (the dedicated Stop word or button press still stops it).
+	if c.phase == phaseListening || (n.woke && config.Get().Brain.Direct() && (c.phase == phaseThinking || c.phase == phaseReplying)) {
+		slog.Info("wake word ignored, turn already active", "phase", c.phase, "slot", slot+1)
 		return false
 	}
 
@@ -1649,6 +1651,9 @@ func (c *conversation) stream(ctx context.Context, be backend, slot int, followU
 	frames, pre, unlisten := c.source.ListenHistory("turn", history)
 	defer unlisten()
 	hold := holdsForTone(slot, followUp)
+	if _, direct := be.(*direct); direct && wakeword.Tones(slot, followUp) {
+		hold = true
+	}
 	slog.Info("turn: wake sound", "tone", wakeword.Tones(slot, followUp), "held", hold, "history_ms", len(pre)*1000/mic.Rate)
 	c.pump(ctx, be, slot, followUp, continued, hold, id, pre, frames)
 }

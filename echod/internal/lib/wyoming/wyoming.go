@@ -191,9 +191,21 @@ func (t *Transcriber) Close() { t.c.close() }
 // Synthesize speaks text in voice ("" for the server's default), and returns the samples and their
 // format as the server sent them.
 func Synthesize(ctx context.Context, addr, text, voice string) ([]int16, Format, error) {
+	var all []int16
+	var fmtOut Format
+	err := SynthesizeStream(ctx, addr, text, voice, func(samples []int16, f Format) {
+		fmtOut = f
+		all = append(all, samples...)
+	})
+	return all, fmtOut, err
+}
+
+// SynthesizeStream speaks text in voice and calls onChunk as each audio-chunk arrives from the server
+// so playback can begin on the first sentence without waiting for the entire reply to synthesize.
+func SynthesizeStream(ctx context.Context, addr, text, voice string, onChunk func([]int16, Format)) error {
 	c, err := dial(ctx, addr)
 	if err != nil {
-		return nil, Format{}, err
+		return err
 	}
 	defer c.close()
 	req := map[string]any{"text": text}
@@ -201,14 +213,14 @@ func Synthesize(ctx context.Context, addr, text, voice string) ([]int16, Format,
 		req["voice"] = map[string]string{"name": voice}
 	}
 	if err := c.send("synthesize", req, nil); err != nil {
-		return nil, Format{}, err
+		return err
 	}
 	var f Format
-	var pcm []byte
+	var total int
 	for {
 		typ, data, payload, err := c.recv()
 		if err != nil {
-			return nil, Format{}, err
+			return err
 		}
 		switch typ {
 		case "audio-start":
@@ -217,22 +229,25 @@ func Synthesize(ctx context.Context, addr, text, voice string) ([]int16, Format,
 			if f.Rate == 0 {
 				f = formatOf(data)
 			}
-			pcm = append(pcm, payload...)
-			if len(pcm) > maxBody {
-				return nil, Format{}, errors.New("wyoming: speech too long")
+			total += len(payload)
+			if total > maxBody {
+				return errors.New("wyoming: speech too long")
+			}
+			if len(payload) >= 2 && f.Width == 2 && f.Channels == 1 && f.Rate > 0 && onChunk != nil {
+				out := make([]int16, len(payload)/2)
+				for i := range out {
+					out[i] = int16(binary.LittleEndian.Uint16(payload[2*i:]))
+				}
+				onChunk(out, f)
 			}
 		case "audio-stop":
 			if f.Width != 2 || f.Channels != 1 || f.Rate <= 0 {
-				return nil, Format{}, fmt.Errorf("wyoming: speech in %+v, not 16-bit mono", f)
+				return fmt.Errorf("wyoming: speech in %+v, not 16-bit mono", f)
 			}
-			out := make([]int16, len(pcm)/2)
-			for i := range out {
-				out[i] = int16(binary.LittleEndian.Uint16(pcm[2*i:]))
-			}
-			return out, f, nil
+			return nil
 		case "error":
 			msg, _ := data["text"].(string)
-			return nil, Format{}, fmt.Errorf("wyoming: %s", msg)
+			return fmt.Errorf("wyoming: %s", msg)
 		}
 	}
 }
