@@ -42,7 +42,6 @@ type direct struct {
 
 	mu     sync.Mutex
 	pcm    []byte
-	phrase string
 	cancel context.CancelFunc
 	ctx    context.Context
 }
@@ -53,7 +52,7 @@ func (d *direct) Name() string { return "direct" }
 
 func (d *direct) Ready() bool { return config.Get().Brain.Direct() }
 
-func (d *direct) Start(phrase string) error {
+func (d *direct) Start(string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.cancel != nil {
@@ -61,7 +60,6 @@ func (d *direct) Start(phrase string) error {
 	}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.pcm = d.pcm[:0]
-	d.phrase = phrase
 	return nil
 }
 
@@ -81,13 +79,12 @@ func (d *direct) End() error {
 	d.mu.Lock()
 	ctx := d.ctx
 	pcm := append([]byte(nil), d.pcm...)
-	phrase := d.phrase
 	d.pcm = d.pcm[:0]
 	d.mu.Unlock()
 	if ctx == nil {
 		return nil
 	}
-	safe.Go("direct turn", func() { d.answer(ctx, pcm, phrase) })
+	safe.Go("direct turn", func() { d.answer(ctx, pcm) })
 	return nil
 }
 
@@ -99,13 +96,12 @@ func (d *direct) Stop() error {
 	}
 	d.ctx, d.cancel = nil, nil
 	d.pcm = d.pcm[:0]
-	d.phrase = ""
 	return nil
 }
 
 // answer runs the three steps and reports each the way Home Assistant's pipeline events are
 // reported, so the conversation cannot tell the two apart.
-func (d *direct) answer(ctx context.Context, pcm []byte, phrase string) {
+func (d *direct) answer(ctx context.Context, pcm []byte) {
 	b := config.Get().Brain
 	fail := func(code string, err error) {
 		if ctx.Err() == nil {
@@ -120,12 +116,6 @@ func (d *direct) answer(ctx context.Context, pcm []byte, phrase string) {
 		return
 	}
 	heard = strings.TrimSpace(heard)
-	// When woken by the wake word ("Hi Reachy" / "Hey Reachy" / "Reachy") and the user pauses to wait
-	// for Reachy to greet them first, treat the wake greeting itself as the prompt so Reachy warmly
-	// answers instead of silently dropping the turn.
-	if heard == "" && phrase != "" {
-		heard = "Hallo Reachy!"
-	}
 	heardAt := time.Since(start)
 	d.post(event{kind: evHeard, text: heard})
 	if heard == "" {
