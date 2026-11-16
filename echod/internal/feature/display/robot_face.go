@@ -16,20 +16,8 @@ import (
 
 const (
 	robotScreenID  = "robot"
-	headTiltLevels = 9 // -6.0 deg to +6.0 deg in 1.5 deg steps
+	headTiltLevels = 13 // -7.5 deg to +7.5 deg in 1.25 deg steps
 )
-
-type bubbleStamp struct {
-	img  *image.RGBA
-	ox   int
-	oy   int
-	bhw  float64
-	bhh  float64
-	freq float64
-	ph   float64
-	bdx  float64
-	bdy  float64
-}
 
 type robotRenderCache struct {
 	size       image.Rectangle
@@ -41,7 +29,6 @@ type robotRenderCache struct {
 	heads      [headTiltLevels]*image.RGBA
 	headOX     int
 	headOY     int
-	bubbles    [5]bubbleStamp
 }
 
 func init() {
@@ -97,35 +84,13 @@ func sdOrientedRRect(px, py, cx, cy, hx, hy, r, cosA, sinA float64) (float64, fl
 	dx, dy := px-cx, py-cy
 	lx := dx*cosA + dy*sinA
 	ly := -dx*sinA + dy*cosA
+	// Subtle pillow crown along top/bottom edges matching physical Reachy Mini shell
+	nx := lx / max(1.0, hx)
+	crown := 3.5 * (1.0 - min(1.0, nx*nx))
 	qx := math.Abs(lx) - (hx - r)
-	qy := math.Abs(ly) - (hy - r)
+	qy := math.Abs(ly) - (hy + crown - r)
 	out := math.Hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r
 	return out, lx, ly
-}
-
-func sdTriangle2D(px, py, x0, y0, x1, y1, x2, y2 float64) float64 {
-	e0x, e0y := x1-x0, y1-y0
-	e1x, e1y := x2-x1, y2-y1
-	e2x, e2y := x0-x2, y0-y2
-	v0x, v0y := px-x0, py-y0
-	v1x, v1y := px-x1, py-y1
-	v2x, v2y := px-x2, py-y2
-	pq0x := v0x - e0x*clamp01((v0x*e0x+v0y*e0y)/(e0x*e0x+e0y*e0y+1e-9))
-	pq0y := v0y - e0y*clamp01((v0x*e0x+v0y*e0y)/(e0x*e0x+e0y*e0y+1e-9))
-	pq1x := v1x - e1x*clamp01((v1x*e1x+v1y*e1y)/(e1x*e1x+e1y*e1y+1e-9))
-	pq1y := v1y - e1y*clamp01((v1x*e1x+v1y*e1y)/(e1x*e1x+e1y*e1y+1e-9))
-	pq2x := v2x - e2x*clamp01((v2x*e2x+v2y*e2y)/(e2x*e2x+e2y*e2y+1e-9))
-	pq2y := v2y - e2y*clamp01((v2x*e2x+v2y*e2y)/(e2x*e2x+e2y*e2y+1e-9))
-	s := 1.0
-	if e0x*e2y-e0y*e2x < 0 {
-		s = -1.0
-	}
-	d2 := min(pq0x*pq0x+pq0y*pq0y, min(pq1x*pq1x+pq1y*pq1y, pq2x*pq2x+pq2y*pq2y))
-	cMin := min(s*(v0x*e0y-v0y*e0x), min(s*(v1x*e1y-v1y*e1x), s*(v2x*e2y-v2y*e2x)))
-	if cMin > 0 {
-		return -math.Sqrt(d2)
-	}
-	return math.Sqrt(d2)
 }
 
 func blendPre(dst *image.RGBA, x, y int, c color.RGBA, a float64) {
@@ -155,20 +120,21 @@ func ensureProceduralStamps(cache *robotRenderCache, sc float64) {
 	cache.synthScale = sc
 	darkInk := color.RGBA{20, 18, 26, 255}
 	pureWhite := color.RGBA{255, 255, 255, 255}
-	baseCream := color.RGBA{245, 236, 224, 255}
-	warmPeach := color.RGBA{253, 229, 198, 255}
-	coolShadow := color.RGBA{178, 190, 206, 255}
+	baseCream := color.RGBA{246, 239, 229, 255}
+	warmPeach := color.RGBA{253, 233, 206, 255}
+	coolShadow := color.RGBA{176, 188, 206, 255}
 
-	// 1. Synthesize 9 tilted 3D-shaded pillow head shells (-6 deg to +6 deg).
-	hx, hy, hr := 96.0*sc, 72.0*sc, 40.0*sc
-	pad := int(math.Ceil(18.0 * sc))
+	// Synthesize 13 tilted 3D-shaded Reachy Mini pillow head shells (-7.5 deg to +7.5 deg in 1.25 deg steps).
+	// Hero-sized head (no speech bubbles around it).
+	hx, hy, hr := 130.0*sc, 92.0*sc, 50.0*sc
+	pad := int(math.Ceil(22.0 * sc))
 	hw := int(math.Ceil(hx)) + pad
 	hh := int(math.Ceil(hy)) + pad
 	w, h := hw*2, hh*2
 	cache.headOX, cache.headOY = hw, hh
 
 	for idx := 0; idx < headTiltLevels; idx++ {
-		deg := -6.0 + float64(idx)*1.5
+		deg := -7.5 + float64(idx)*1.25
 		rad := deg * math.Pi / 180.0
 		cosA, sinA := math.Cos(rad), math.Sin(rad)
 		img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -179,11 +145,11 @@ func ensureProceduralStamps(cache *robotRenderCache, sc float64) {
 			for x := 0; x < w; x++ {
 				px := float64(x) + 0.5
 				d, lx, ly := sdOrientedRRect(px, py, cx, cy, hx, hy, hr, cosA, sinA)
-				if d > 8.5*sc {
+				if d > 8.0*sc {
 					continue
 				}
-				if d <= 8.5*sc {
-					blendPre(img, x, y, pureWhite, clamp01(0.5-(d-8.5*sc)))
+				if d <= 8.0*sc {
+					blendPre(img, x, y, pureWhite, clamp01(0.5-(d-8.0*sc)))
 				}
 				if d <= 3.2*sc {
 					blendPre(img, x, y, darkInk, clamp01(0.5-(d-3.2*sc)))
@@ -191,24 +157,26 @@ func ensureProceduralStamps(cache *robotRenderCache, sc float64) {
 				if d <= -1.4*sc {
 					ux := (lx + hx) / (2.0 * hx)
 					uy := (ly + hy) / (2.0 * hy)
-					warmT := clamp01(ux*0.75 + (1.0-uy)*0.45 - 0.2)
+					warmT := clamp01(ux*0.75 + (1.0-uy)*0.45 - 0.18)
 					col := lerp(baseCream, warmPeach, warmT)
 
+					// Left & bottom 3D bevel shadow matching physical Reachy Mini pillow shell
 					dShadow, _, _ := sdOrientedRRect(
-						px-16.5*sc*cosA,
-						py+11.0*sc,
-						cx, cy, hx-3.6*sc, hy-3.6*sc, hr-1.8*sc, cosA, sinA,
+						px-20.0*sc*cosA,
+						py+13.5*sc,
+						cx, cy, hx-4.2*sc, hy-4.2*sc, hr-2.0*sc, cosA, sinA,
 					)
-					if dShadow > -3.6*sc {
-						st := clamp01((dShadow + 3.6*sc) / (2.8 * sc))
+					if dShadow > -4.2*sc {
+						st := clamp01((dShadow + 4.2*sc) / (3.2 * sc))
 						col = lerp(col, coolShadow, st*0.92)
 					}
 
-					if lx > 2.0*sc && ly < 2.0*sc {
-						tx := clamp01((lx - 2.0*sc) / (16.0 * sc))
-						ty := clamp01((-2.0*sc - ly) / (16.0 * sc))
+					// Top-right curved specular studio gloss highlight
+					if lx > 4.0*sc && ly < 4.0*sc {
+						tx := clamp01((lx - 4.0*sc) / (22.0 * sc))
+						ty := clamp01((-4.0*sc - ly) / (22.0 * sc))
 						envH := min(tx, ty)
-						dCurve := math.Abs(d+12.5*sc) - 4.8*sc*envH
+						dCurve := math.Abs(d+15.5*sc) - 5.8*sc*envH
 						if dCurve < 1.0 && envH > 0.05 {
 							col = lerp(col, pureWhite, clamp01(0.5-dCurve)*0.92)
 						}
@@ -218,69 +186,6 @@ func ensureProceduralStamps(cache *robotRenderCache, sc float64) {
 			}
 		}
 		cache.heads[idx] = img
-	}
-
-	// 2. Synthesize the 5 seamless SDF speech-bubble shells (rounded rect + triangular pointer tail).
-	specs := [5]struct {
-		bdx, bdy, bhw, bhh, br, tbx, ttdx, ttdy, freq, ph float64
-	}{
-		{-128, -148, 70, 31, 15, 22, 35, 44, 0.36, 0.0},
-		{-178, -48, 50, 28, 24, 16, 31, 37, 0.40, 1.4},
-		{48, -152, 35, 20, 11, -11, -18, 31, 0.44, 2.7},
-		{138, -102, 61, 24, 13, -31, -42, 37, 0.38, 0.9},
-		{162, -29, 50, 28, 24, -18, -31, 37, 0.39, 3.6},
-	}
-
-	for i, sp := range specs {
-		bhw, bhh, br := sp.bhw*sc, sp.bhh*sc, sp.br*sc
-		tbx, ttdx, ttdy := sp.tbx*sc, sp.ttdx*sc, sp.ttdy*sc
-		bpad := int(math.Ceil(10.0 * sc))
-		minX := int(math.Floor(min(-bhw, ttdx))) - bpad
-		maxX := int(math.Ceil(max(bhw, ttdx))) + bpad
-		minY := int(math.Floor(-bhh)) - bpad
-		maxY := int(math.Ceil(max(bhh, ttdy))) + bpad
-		bw, bh := maxX-minX, maxY-minY
-		ox, oy := -minX, -minY
-
-		img := image.NewRGBA(image.Rect(0, 0, bw, bh))
-		bcx, bcy := float64(ox), float64(oy)
-		tx0, ty0 := bcx+tbx-10.0*sc, bcy+bhh-5.5*sc
-		tx1, ty1 := bcx+tbx+10.0*sc, bcy+bhh-5.5*sc
-		tx2, ty2 := bcx+ttdx, bcy+ttdy
-
-		for y := 0; y < bh; y++ {
-			py := float64(y) + 0.5
-			for x := 0; x < bw; x++ {
-				px := float64(x) + 0.5
-				dr, _, _ := sdOrientedRRect(px, py, bcx, bcy, bhw, bhh, br, 1.0, 0.0)
-				dt := sdTriangle2D(px, py, tx0, ty0, tx1, ty1, tx2, ty2) - 1.4*sc
-				d := min(dr, dt)
-				if d > 6.0*sc {
-					continue
-				}
-				if d <= 6.0*sc {
-					blendPre(img, x, y, pureWhite, clamp01(0.5-(d-6.0*sc)))
-				}
-				if d <= 2.0*sc {
-					blendPre(img, x, y, darkInk, clamp01(0.5-(d-2.0*sc)))
-				}
-				if d <= -1.2*sc {
-					blendPre(img, x, y, pureWhite, clamp01(0.5-(d+1.2*sc)))
-				}
-			}
-		}
-
-		cache.bubbles[i] = bubbleStamp{
-			img:  img,
-			ox:   ox,
-			oy:   oy,
-			bhw:  bhw,
-			bhh:  bhh,
-			freq: sp.freq / sc,
-			ph:   sp.ph,
-			bdx:  sp.bdx * sc,
-			bdy:  sp.bdy * sc,
-		}
 	}
 }
 
@@ -340,92 +245,163 @@ type robotGeom struct {
 	tiltIdx     int
 	tiltDeg     float64
 	cosA, sinA  float64
-	antSway     float64
+	nodPitchY   float64
+	turnYawX    float64
+	talkEnergy  float64
+	listenLevel float64
+	antWhipL    float64
+	antWhipR    float64
 	coilStretch float64
 	blinkL      float64
 	blinkR      float64
+	lowerSmile  float64
 	dirty       image.Rectangle
 }
 
 func computeRobotGeom(r *renderer, snap robot.Snapshot, now time.Time) robotGeom {
 	barH := r.s(customBarH)
-	sc := float64(r.w) / float64(drawnFor) * 0.90
-
-	sockX := snap.LookX * float64(r.s(28))
-	sockY := snap.LookY * float64(r.s(10))
+	sc := float64(r.w) / float64(drawnFor) * 0.92
 
 	tSec := float64(now.UnixMilli()%60000) / 1000.0
+
+	// Voice / conversational envelope for talking and listening head micro-animations
+	talkEnergy := clamp01(snap.MouthOpen)
+	if snap.Mood == robot.MoodSpeaking && talkEnergy < 0.25 {
+		// Ensure continuous syllabic modulation even between envelope peaks during speaking turns
+		talkEnergy = 0.25 + 0.35*(0.5+0.5*math.Sin(tSec*11.5)*math.Cos(tSec*4.7))
+	}
+	listenLevel := clamp01(snap.ListenPulse)
+	if snap.Mood == robot.MoodListening && listenLevel < 0.25 {
+		listenLevel = 0.25 + 0.25*(0.5+0.5*math.Sin(tSec*6.5))
+	}
+
+	// Multi-harmonic syllabic head nodding (pitch), conversational head turns (yaw), and head tilts (roll)
+	syllableNod := talkEnergy * (0.62*math.Sin(tSec*13.0) + 0.38*math.Cos(tSec*8.3+0.7))
+	syllableYaw := talkEnergy * (0.55*math.Sin(tSec*5.4+0.3) + 0.45*math.Cos(tSec*3.7))
+	syllableTilt := talkEnergy * (0.60*math.Sin(tSec*6.8+0.4) + 0.40*math.Cos(tSec*4.1))
+
 	breathY := 0.0
 	idleTilt := 0.0
 	if snap.Mood != robot.MoodSleepy {
 		breathY = math.Sin(tSec*1.8) * float64(r.s(2))
-		idleTilt = math.Sin(tSec*1.1) * 1.2
+		idleTilt = math.Sin(tSec*1.1) * 1.3
 	}
+
+	sockX := (snap.LookX + syllableYaw*0.32) * float64(r.s(30))
+	sockY := (snap.LookY + syllableNod*0.42) * float64(r.s(12))
 
 	cx0 := float64(r.w)*0.5 + sockX
-	cy0 := float64(barH) + float64(r.h-barH)*0.67 + sockY + breathY
+	cy0 := float64(barH) + float64(r.h-barH)*0.63 + sockY + breathY
 
-	// Dynamic head-roll tilt driven by gaze, mood, and gentle breathing sway
-	tiltDeg := -2.5 - snap.LookX*3.0 + idleTilt
+	// Dynamic head-roll tilt driven by gaze, mood, listening head-cock, and talking cadence
+	tiltDeg := -2.0 - snap.LookX*3.2 + idleTilt + syllableTilt*4.8
+	nodPitchY := snap.LookY*9.5*sc + syllableNod*9.0*sc
+	turnYawX := snap.LookX*15.5*sc + syllableYaw*7.5*sc
+
 	switch snap.Mood {
 	case robot.MoodCurious:
-		tiltDeg += 4.5
+		tiltDeg += 5.0
+		nodPitchY -= 3.0 * sc
+	case robot.MoodListening:
+		// Attentive head cock & slight upward perk while listening
+		tiltDeg += 3.8 + 1.5*math.Sin(tSec*3.2)
+		nodPitchY -= (3.5 + 2.5*listenLevel) * sc
+	case robot.MoodThinking:
+		// Thoughtful side tilt & upward pondering gaze
+		tiltDeg += 4.5 * math.Sin(tSec*2.2)
+		nodPitchY -= 5.5 * sc
+		turnYawX += 7.0 * math.Cos(tSec*1.8) * sc
 	case robot.MoodHappy:
-		tiltDeg += math.Sin(tSec*6.0) * 3.0
+		tiltDeg += math.Sin(tSec*6.0) * 3.8
+		nodPitchY -= 2.5 * sc
 	case robot.MoodStartled:
 		tiltDeg = 0.0
+		nodPitchY -= 5.0 * sc
+	case robot.MoodSleepy:
+		tiltDeg -= 3.2
+		nodPitchY += 7.0 * sc
 	}
-	tiltIdx := int(math.Round((tiltDeg + 6.0) / 1.5))
+	if snap.PetGlow > 0.01 {
+		tiltDeg += 4.5 * snap.PetGlow * math.Sin(tSec*5.5)
+	}
+
+	tiltIdx := int(math.Round((tiltDeg + 7.5) / 1.25))
 	if tiltIdx < 0 {
 		tiltIdx = 0
 	} else if tiltIdx >= headTiltLevels {
 		tiltIdx = headTiltLevels - 1
 	}
-	snappedDeg := -6.0 + float64(tiltIdx)*1.5
+	snappedDeg := -7.5 + float64(tiltIdx)*1.25
 	rad := snappedDeg * math.Pi / 180.0
 	cosA, sinA := math.Cos(rad), math.Sin(rad)
 
-	// Spring-whip antenna sway & coil stretch
-	antSway := -snap.LookX*0.55 + math.Sin(tSec*3.2)*0.22
+	// Independent left/right spring-whip antenna kinematics & helical coil compression/extension
+	baseSway := -snap.LookX*0.55 + math.Sin(tSec*3.1)*0.20
+	antWhipL := baseSway
+	antWhipR := baseSway
 	coilStretch := 1.0 + 0.05*math.Sin(tSec*3.6)
+
 	switch snap.Mood {
 	case robot.MoodListening:
-		antSway += math.Sin(tSec*9.0) * (0.18 + 0.25*clamp01(snap.ListenPulse))
-		coilStretch = 1.08 + 0.10*clamp01(snap.ListenPulse)
+		// Antennas perk inward attentively with high-frequency micro-tremor
+		perk := 0.25 + 0.25*listenLevel
+		antWhipL += perk + math.Sin(tSec*14.0)*(0.14+0.20*listenLevel)
+		antWhipR -= perk + math.Cos(tSec*14.0)*(0.14+0.20*listenLevel)
+		coilStretch = 1.08 + 0.10*listenLevel
+	case robot.MoodThinking:
+		// Alternating pondering antenna twitches
+		antWhipL += 0.42 * math.Sin(tSec*4.5)
+		antWhipR += 0.42 * math.Cos(tSec*4.5)
+		coilStretch = 1.04 + 0.07*math.Sin(tSec*5.0)
 	case robot.MoodSpeaking:
-		antSway += math.Sin(tSec*10.0) * (0.15 + 0.30*clamp01(snap.MouthOpen))
-		coilStretch = 1.05 + 0.12*clamp01(snap.MouthOpen)
+		// Lively counter-harmonic syllabic whip & spring bounce while speaking
+		antWhipL += talkEnergy * (0.48*math.Sin(tSec*12.5) + 0.28*math.Cos(tSec*19.0))
+		antWhipR += talkEnergy * (-0.48*math.Sin(tSec*12.5+0.4) + 0.28*math.Sin(tSec*17.5))
+		coilStretch = 1.04 + 0.16*talkEnergy*(0.6+0.4*math.Sin(tSec*15.0))
 	case robot.MoodStartled:
 		coilStretch = 1.18
+		antWhipL = -0.35
+		antWhipR = 0.35
 	case robot.MoodHappy:
-		antSway += math.Sin(tSec*8.0) * 0.35
-		coilStretch = 1.10
+		antWhipL += math.Sin(tSec*8.5) * 0.42
+		antWhipR -= math.Sin(tSec*8.5) * 0.42
+		coilStretch = 1.12
 	case robot.MoodSleepy:
-		antSway = 0.05
-		coilStretch = 0.90
+		antWhipL = -0.30
+		antWhipR = 0.30
+		coilStretch = 0.88
+	}
+	if talkEnergy > 0.02 && snap.Mood != robot.MoodSpeaking {
+		antWhipL += talkEnergy * 0.40 * math.Sin(tSec*12.5)
+		antWhipR -= talkEnergy * 0.40 * math.Sin(tSec*12.5)
+		coilStretch += 0.12 * talkEnergy
 	}
 
-	// Natural blink + occasional double-blink + curious asymmetric squint
-	var blinkL, blinkR float64
+	// Natural blink + occasional double-blink + curious squint + talking lower-lid cheek smile
+	var blinkL, blinkR, lowerSmile float64
 	if snap.Mood != robot.MoodStartled && snap.Mood != robot.MoodHappy && snap.Mood != robot.MoodSleepy {
-		cycleMS := now.UnixMilli() % 4400
+		cycleMS := now.UnixMilli() % 4200
 		if cycleMS >= 0 && cycleMS < 140 {
 			blinkL = math.Sin(float64(cycleMS) / 140.0 * math.Pi)
 			blinkR = blinkL
-		} else if cycleMS >= 220 && cycleMS < 350 && (now.UnixMilli()/4400)%3 == 0 {
-			// Every 3rd blink cycle performs a natural double-blink
+		} else if cycleMS >= 220 && cycleMS < 350 && (now.UnixMilli()/4200)%3 == 0 {
 			blinkL = math.Sin(float64(cycleMS-220) / 130.0 * math.Pi)
 			blinkR = blinkL
 		}
 		if snap.Mood == robot.MoodCurious {
-			// Inquisitive asymmetric squint on smaller right lens
-			blinkR = max(blinkR, 0.38)
+			blinkR = max(blinkR, 0.36)
 		}
 	}
+	if talkEnergy > 0.03 {
+		// Engaged lower-lid cheek crinkle that lifts rhythmically on spoken syllables
+		lowerSmile = clamp01(0.12 + 0.26*talkEnergy*(0.65+0.35*math.Sin(tSec*13.0)))
+	} else if listenLevel > 0.05 {
+		lowerSmile = clamp01(0.08 * listenLevel)
+	}
 
-	halfSpanX := int(math.Ceil(252.0 * sc))
-	topSpanY := int(math.Ceil(242.0 * sc))
-	botSpanY := int(math.Ceil(96.0 * sc))
+	halfSpanX := int(math.Ceil(215.0 * sc))
+	topSpanY := int(math.Ceil(268.0 * sc))
+	botSpanY := int(math.Ceil(126.0 * sc))
 
 	dirty := image.Rect(
 		int(math.Floor(cx0))-halfSpanX,
@@ -442,10 +418,16 @@ func computeRobotGeom(r *renderer, snap robot.Snapshot, now time.Time) robotGeom
 		tiltDeg:     snappedDeg,
 		cosA:        cosA,
 		sinA:        sinA,
-		antSway:     antSway,
+		nodPitchY:   nodPitchY,
+		turnYawX:    turnYawX,
+		talkEnergy:  talkEnergy,
+		listenLevel: listenLevel,
+		antWhipL:    antWhipL,
+		antWhipR:    antWhipR,
 		coilStretch: coilStretch,
 		blinkL:      blinkL,
 		blinkR:      blinkR,
+		lowerSmile:  lowerSmile,
 		dirty:       dirty,
 	}
 }
@@ -457,127 +439,65 @@ func paintArticulatedReachy(r *renderer, cache *robotRenderCache, snap robot.Sna
 	darkInk := color.RGBA{20, 18, 26, 255}
 	pureWhite := color.RGBA{255, 255, 255, 255}
 
-	// 1. Orbiting Floating Speech Bubbles + Live 60 Hz Multi-Harmonic Audio Waveforms
-	paintOrbitingSpeechBubbles(r, cache, snap, g, tSec)
-
-	// 2. Spring-Physics Articulated Twin Helical-Coil Antennas + Signal Rings (in front of top bubbles)
+	// 1. Spring-Physics Articulated Twin Helical-Coil Antennas (no floating speech bubbles!)
 	paintSpringAntennas(r, snap, g, tSec, darkInk, pureWhite)
 
-	// 3. 3D-Shaded Tilted Pillow Head Shell (with cool blue-grey bevel shadow & top-right contour gloss)
+	// 2. 3D-Shaded Tilted Pillow Head Shell (with cool blue-grey bevel shadow & top-right contour gloss)
 	headImg := cache.heads[g.tiltIdx]
 	if headImg != nil {
 		blitRGBA(r.dst, headImg, int(math.Round(g.cx0))-cache.headOX, int(math.Round(g.cy0))-cache.headOY, g.dirty)
 	}
 
-	// 4. Forehead Pet Rosy/Amber Cheek Glow on Cream Face
 	rotPt := func(lx, ly float64) (float64, float64) {
 		return g.cx0 + lx*g.cosA - ly*g.sinA, g.cy0 + lx*g.sinA + ly*g.cosA
 	}
+
+	// 3. Forehead Pet Rosy/Amber Cheek Glow on Cream Face
 	if snap.PetGlow > 0.01 {
-		cheekCol := color.RGBA{242, 148, 110, uint8(clamp01(snap.PetGlow) * 140)}
-		clx, cly := rotPt(-54.0*g.sc, 28.0*g.sc)
-		crx, cry := rotPt(76.0*g.sc, 24.0*g.sc)
-		drawAlphaDisc(r, clx, cly, 16.0*g.sc, cheekCol)
-		drawAlphaDisc(r, crx, cry, 13.5*g.sc, cheekCol)
+		cheekCol := color.RGBA{242, 148, 110, uint8(clamp01(snap.PetGlow) * 145)}
+		clx, cly := rotPt(-72.0*g.sc+g.turnYawX*0.5, 34.0*g.sc+g.nodPitchY*0.6)
+		crx, cry := rotPt(96.0*g.sc+g.turnYawX*0.5, 28.0*g.sc+g.nodPitchY*0.6)
+		drawAlphaDisc(r, clx, cly, 20.0*g.sc, cheekCol)
+		drawAlphaDisc(r, crx, cry, 17.0*g.sc, cheekCol)
 	}
 
-	// 5. 2.5D Parallax Bronze Spectacle Bridge + Asymmetric Round Camera Lenses
-	pShiftX := snap.LookX * 13.0 * g.sc
-	pShiftY := snap.LookY * 7.5 * g.sc
-	elx, ely := rotPt(-20.0*g.sc+pShiftX, 8.0*g.sc+pShiftY)
-	erx, ery := rotPt(54.0*g.sc+pShiftX, 4.0*g.sc+pShiftY)
-	rL := 32.5 * g.sc
-	rR := 25.0 * g.sc
+	// 4. 2.5D Parallax Spectacle Bridge + Asymmetric Round Camera Lenses
+	// Spectacles sit on the front surface of the curved head, shifting with 3D yaw and pitch nod!
+	elx, ely := rotPt(-28.0*g.sc+g.turnYawX, 8.0*g.sc+g.nodPitchY)
+	erx, ery := rotPt(68.0*g.sc+g.turnYawX, 3.0*g.sc+g.nodPitchY)
 
-	// Bronze spectacle nose bridge bar with center vertical notch
-	bx0, by0 := elx+18.0*g.sc*g.cosA, ely+18.0*g.sc*g.sinA
-	bx1, by1 := erx-14.0*g.sc*g.cosA, ery-14.0*g.sc*g.sinA
-	r.aaLine(bx0, by0, bx1, by1, 11.5*g.sc, darkInk)
-	r.aaLine(bx0, by0, bx1, by1, 6.2*g.sc, color.RGBA{92, 62, 44, 255})
+	// Subtle 3D perspective foreshortening of left/right lens radii as the head turns left/right
+	yawNorm := clamp01((snap.LookX+1.0)*0.5) - 0.5 // -0.5 .. +0.5
+	rL := 42.5 * g.sc * (1.0 - yawNorm*0.08)
+	rR := 33.0 * g.sc * (1.0 + yawNorm*0.08)
+
+	// Spectacle nose bridge bar with center optical sensor dot (matching real Reachy Mini hardware)
+	bx0, by0 := elx+24.0*g.sc*g.cosA, ely+24.0*g.sc*g.sinA
+	bx1, by1 := erx-18.0*g.sc*g.cosA, ery-18.0*g.sc*g.sinA
+	r.aaLine(bx0, by0, bx1, by1, 14.5*g.sc, darkInk)
+	r.aaLine(bx0, by0, bx1, by1, 8.0*g.sc, color.RGBA{92, 62, 44, 255})
 	mbx, mby := (bx0+bx1)*0.5, (by0+by1)*0.5
-	r.aaLine(mbx-2.0*g.sc*g.sinA, mby-3.8*g.sc*g.cosA, mbx+2.0*g.sc*g.sinA, mby+3.8*g.sc*g.cosA, 2.2*g.sc, darkInk)
+	r.aaLine(mbx-2.4*g.sc*g.sinA, mby-4.8*g.sc*g.cosA, mbx+2.4*g.sc*g.sinA, mby+4.8*g.sc*g.cosA, 2.6*g.sc, darkInk)
 
-	// Draw left (larger) and right (smaller) optical spectacle lenses
-	paintOpticalLens(r, elx, ely, rL, g.blinkL, snap, g, darkInk, pureWhite)
-	paintOpticalLens(r, erx, ery, rR, g.blinkR, snap, g, darkInk, pureWhite)
-}
-
-func paintOrbitingSpeechBubbles(r *renderer, cache *robotRenderCache, snap robot.Snapshot, g robotGeom, tSec float64) {
-	cPurple := color.RGBA{112, 90, 162, 255}
-	cMagenta := color.RGBA{168, 102, 148, 255}
-	cCoral := color.RGBA{222, 126, 78, 255}
-	cAmber := color.RGBA{242, 168, 76, 255}
-
-	speed := 6.0
-	ampScale := 0.82
-	bobAmp := 3.5 * g.sc
-
-	switch snap.Mood {
-	case robot.MoodListening:
-		speed = 11.5
-		ampScale = 0.78 + 0.50*clamp01(snap.ListenPulse)
-		bobAmp = 5.0 * g.sc
-	case robot.MoodSpeaking:
-		speed = 13.5
-		ampScale = 0.70 + 0.60*clamp01(snap.MouthOpen)
-		bobAmp = 5.5 * g.sc
-	case robot.MoodThinking:
-		speed = 9.5
-		ampScale = 0.90
-	case robot.MoodStartled:
-		speed = 15.0
-		ampScale = 1.15
-	case robot.MoodSleepy:
-		speed = 2.0
-		ampScale = 0.25
-		bobAmp = 1.5 * g.sc
+	// Center bridge optical sensor dot — pulses with syllabic voice luminance when talking or listening
+	if g.talkEnergy > 0.02 || g.listenLevel > 0.02 {
+		pulse := clamp01(g.talkEnergy*(0.65+0.35*math.Sin(tSec*14.0)) + g.listenLevel*0.75)
+		dotCol := lerp(color.RGBA{120, 95, 75, 255}, color.RGBA{255, 196, 110, 255}, pulse)
+		r.aaDisc(mbx, mby, (2.2+1.2*pulse)*g.sc, dotCol)
 	}
 
-	strokeW := max(1.8, 2.3*g.sc)
-
-	for i := range cache.bubbles {
-		b := &cache.bubbles[i]
-		bobX := math.Sin(tSec*1.9+float64(i)*1.3) * bobAmp
-		bobY := math.Cos(tSec*2.3+float64(i)*1.7) * bobAmp
-		bcx := g.cx0 + b.bdx + bobX
-		bcy := g.cy0 + b.bdy + bobY
-
-		blitRGBA(r.dst, b.img, int(math.Round(bcx))-b.ox, int(math.Round(bcy))-b.oy, g.dirty)
-
-		xStart := bcx - b.bhw + 13.0*g.sc
-		xEnd := bcx + b.bhw - 13.0*g.sc
-		span := max(1.0, xEnd-xStart)
-		maxAmp := (b.bhh - 8.5*g.sc) * ampScale
-
-		var prevX, prevY float64
-		step := max(1.2, 1.6*g.sc)
-		for x := xStart; x <= xEnd; x += step {
-			u := (x - xStart) / span
-			env := math.Sin(u * math.Pi)
-			lx := x - xStart
-			w1 := math.Sin(lx*b.freq - tSec*speed + b.ph)
-			w2 := 0.65 * math.Sin(lx*b.freq*1.85+tSec*speed*0.7+b.ph*1.7)
-			w3 := 0.35 * math.Cos(lx*b.freq*0.55-tSec*speed*0.4+b.ph)
-			y := bcy + (w1+w2+w3)*0.48*maxAmp*env
-
-			var col color.RGBA
-			if u < 0.33 {
-				col = lerp(cPurple, cMagenta, u/0.33)
-			} else if u < 0.66 {
-				col = lerp(cMagenta, cCoral, (u-0.33)/0.33)
-			} else {
-				col = lerp(cCoral, cAmber, (u-0.66)/0.34)
-			}
-			if x > xStart {
-				r.aaLine(prevX, prevY, x, y, strokeW, col)
-			}
-			prevX, prevY = x, y
-		}
-	}
+	// Draw left (larger) and right (smaller) optical spectacle lenses with talking iris & eyelid micro-animations
+	paintOpticalLens(r, elx, ely, rL, g.blinkL, snap, g, tSec, darkInk, pureWhite)
+	paintOpticalLens(r, erx, ery, rR, g.blinkR, snap, g, tSec, darkInk, pureWhite)
 }
 
 func paintSpringAntennas(r *renderer, snap robot.Snapshot, g robotGeom, tSec float64, darkInk, pureWhite color.RGBA) {
+	// Antenna mounts experience slight counter-parallax when head pitches forward/backward
+	pitchCounterY := -g.nodPitchY * 0.28
+	yawCounterX := -g.turnYawX * 0.22
 	rotPt := func(lx, ly float64) (float64, float64) {
+		lx += yawCounterX
+		ly += pitchCounterY
 		return g.cx0 + lx*g.cosA - ly*g.sinA, g.cy0 + lx*g.sinA + ly*g.cosA
 	}
 
@@ -586,10 +506,11 @@ func paintSpringAntennas(r *renderer, snap robot.Snapshot, g robotGeom, tSec flo
 		mountLX, mountLY float64
 		coilLX, coilLY   float64
 		baseAngDeg       float64
+		whip             float64
 		length           float64
 	}{
-		{-1, -94.0 * g.sc, -31.0 * g.sc, -83.0 * g.sc, -85.0 * g.sc, -2.5 + g.antSway*7.5, 136.0 * g.sc * g.coilStretch},
-		{+1, 50.0 * g.sc, -70.0 * g.sc, 57.0 * g.sc, -88.0 * g.sc, 15.5 + g.antSway*9.5, 136.0 * g.sc * g.coilStretch},
+		{-1, -124.0 * g.sc, -42.0 * g.sc, -110.0 * g.sc, -108.0 * g.sc, -2.5 + g.antWhipL*9.5, g.antWhipL, 146.0 * g.sc * g.coilStretch},
+		{+1, 68.0 * g.sc, -90.0 * g.sc, 77.0 * g.sc, -112.0 * g.sc, 14.5 + g.antWhipR*11.0, g.antWhipR, 146.0 * g.sc * g.coilStretch},
 	}
 
 	for _, a := range antennas {
@@ -599,90 +520,91 @@ func paintSpringAntennas(r *renderer, snap robot.Snapshot, g robotGeom, tSec flo
 		ux, uy := math.Sin(ang), -math.Cos(ang)
 		pxN, pyN := -uy, ux
 
-		whip := g.antSway * 9.0 * g.sc * a.side
-		tx := bx + ux*a.length + pxN*whip
-		ty := by + uy*a.length + pyN*whip
-		tipBX := bx + ux*(a.length-24.0*g.sc) + pxN*whip*0.86
-		tipBY := by + uy*(a.length-24.0*g.sc) + pyN*whip*0.86
+		whipPx := a.whip * 12.5 * g.sc
+		tx := bx + ux*a.length + pxN*whipPx
+		ty := by + uy*a.length + pyN*whipPx
+		tipBX := bx + ux*(a.length-26.0*g.sc) + pxN*whipPx*0.86
+		tipBY := by + uy*(a.length-26.0*g.sc) + pyN*whipPx*0.86
 
-		// Pass 1: White sticker halo along mount, 6 spring coils, upper rod, and capsule tip
-		r.aaLine(mx, my, bx, by, 15.0*g.sc, pureWhite)
-		r.aaLine(bx, by, tx, ty, 14.0*g.sc, pureWhite)
-		for ci := 0; ci < 6; ci++ {
-			frac := 0.04 + float64(ci)*0.042
-			ccx := bx + ux*(a.length*frac) + pxN*(whip*frac*frac)
-			ccy := by + uy*(a.length*frac) + pyN*(whip*frac*frac)
-			r.aaLine(ccx-pxN*6.8*g.sc, ccy-pyN*6.8*g.sc, ccx+pxN*6.8*g.sc, ccy+pyN*6.8*g.sc, 11.5*g.sc, pureWhite)
+		// Pass 1: Crisp white sticker border along mount, 7 helical spring coils, upper whip rod, and capsule tip
+		r.aaLine(mx, my, bx, by, 16.5*g.sc, pureWhite)
+		r.aaLine(bx, by, tx, ty, 15.0*g.sc, pureWhite)
+		for ci := 0; ci < 7; ci++ {
+			frac := 0.04 + float64(ci)*0.038
+			ccx := bx + ux*(a.length*frac) + pxN*(whipPx*frac*frac)
+			ccy := by + uy*(a.length*frac) + pyN*(whipPx*frac*frac)
+			r.aaLine(ccx-pxN*7.6*g.sc, ccy-pyN*7.6*g.sc, ccx+pxN*7.6*g.sc, ccy+pyN*7.6*g.sc, 12.2*g.sc, pureWhite)
 		}
-		r.aaLine(tipBX, tipBY, tx, ty, 17.5*g.sc, pureWhite)
+		r.aaLine(tipBX, tipBY, tx, ty, 18.5*g.sc, pureWhite)
 
-		// Pass 2: Dark ink mount bracket, 6 helical spring coils, straight rod, and capsule tip
+		// Pass 2: Dark ink mount bracket, 7 helical spring coils with metallic glint, whip rod, and capsule tip
 		if a.side < 0 {
-			r.aaDisc(mx+2.0*g.sc, my+3.5*g.sc, 8.2*g.sc, darkInk)
-			r.aaDisc(mx+3.0*g.sc, my+3.5*g.sc, 5.0*g.sc, color.RGBA{182, 192, 206, 255})
+			r.aaDisc(mx+2.5*g.sc, my+4.0*g.sc, 9.8*g.sc, darkInk)
+			r.aaDisc(mx+3.5*g.sc, my+4.0*g.sc, 6.0*g.sc, color.RGBA{182, 192, 206, 255})
 		} else {
-			r.aaDisc(mx, my+2.0*g.sc, 6.0*g.sc, darkInk)
-			r.aaDisc(mx, my+2.0*g.sc, 3.2*g.sc, color.RGBA{92, 62, 44, 255})
+			r.aaDisc(mx, my+2.2*g.sc, 7.2*g.sc, darkInk)
+			r.aaDisc(mx, my+2.2*g.sc, 4.0*g.sc, color.RGBA{92, 62, 44, 255})
 		}
-		r.aaLine(mx, my, bx+ux*5.5*g.sc, by+uy*5.5*g.sc, 5.0*g.sc, darkInk)
-		coilTopX := bx + ux*(a.length*0.28) + pxN*(whip*0.08)
-		coilTopY := by + uy*(a.length*0.28) + pyN*(whip*0.08)
-		r.aaLine(coilTopX, coilTopY, tx, ty, 3.8*g.sc, darkInk)
-		for ci := 0; ci < 6; ci++ {
-			frac := 0.04 + float64(ci)*0.042
-			ccx := bx + ux*(a.length*frac) + pxN*(whip*frac*frac)
-			ccy := by + uy*(a.length*frac) + pyN*(whip*frac*frac)
-			r.aaLine(ccx-pxN*5.6*g.sc, ccy-pyN*5.6*g.sc, ccx+pxN*5.6*g.sc, ccy+pyN*5.6*g.sc, 3.8*g.sc, darkInk)
+		r.aaLine(mx, my, bx+ux*6.0*g.sc, by+uy*6.0*g.sc, 5.4*g.sc, darkInk)
+		coilTopX := bx + ux*(a.length*0.30) + pxN*(whipPx*0.09)
+		coilTopY := by + uy*(a.length*0.30) + pyN*(whipPx*0.09)
+		r.aaLine(coilTopX, coilTopY, tx, ty, 4.2*g.sc, darkInk)
+		for ci := 0; ci < 7; ci++ {
+			frac := 0.04 + float64(ci)*0.038
+			ccx := bx + ux*(a.length*frac) + pxN*(whipPx*frac*frac)
+			ccy := by + uy*(a.length*frac) + pyN*(whipPx*frac*frac)
+			r.aaLine(ccx-pxN*6.4*g.sc, ccy-pyN*6.4*g.sc, ccx+pxN*6.4*g.sc, ccy+pyN*6.4*g.sc, 4.0*g.sc, darkInk)
+			// Subtle metallic highlight across each spring coil turn
+			r.aaLine(ccx-pxN*3.8*g.sc, ccy-pyN*3.8*g.sc-0.8*g.sc, ccx+pxN*3.8*g.sc, ccy+pyN*3.8*g.sc-0.8*g.sc, 1.3*g.sc, color.RGBA{92, 100, 118, 255})
 		}
-		r.aaLine(tipBX, tipBY, tx, ty, 7.8*g.sc, darkInk)
-		r.aaLine(tipBX+pxN*1.1*g.sc, tipBY+2.5*g.sc, tx+pxN*1.1*g.sc, ty-2.5*g.sc, 1.8*g.sc, color.RGBA{96, 102, 122, 255})
-
-		// Active antenna signal pulse ring when listening, speaking, or thinking
-		if snap.Mood == robot.MoodListening || snap.Mood == robot.MoodSpeaking || snap.Mood == robot.MoodThinking {
-			wave := 0.5 + 0.5*math.Sin(tSec*8.0+a.side)
-			rad := (9.0 + 7.0*wave) * g.sc
-			sigCol := lerp(color.RGBA{168, 102, 148, 255}, color.RGBA{242, 168, 76, 255}, wave)
-			r.aaRing(tx, ty, rad, 2.0*g.sc, 0, 2*math.Pi, sigCol)
-		}
+		r.aaLine(tipBX, tipBY, tx, ty, 8.6*g.sc, darkInk)
+		r.aaLine(tipBX+pxN*1.3*g.sc, tipBY+2.8*g.sc, tx+pxN*1.3*g.sc, ty-2.8*g.sc, 2.0*g.sc, color.RGBA{96, 102, 122, 255})
 	}
 }
 
-func paintOpticalLens(r *renderer, lcx, lcy, lr, blink float64, snap robot.Snapshot, g robotGeom, darkInk, pureWhite color.RGBA) {
-	creamLid := color.RGBA{246, 234, 214, 255}
+func paintOpticalLens(r *renderer, lcx, lcy, lr, blink float64, snap robot.Snapshot, g robotGeom, tSec float64, darkInk, pureWhite color.RGBA) {
+	creamLid := color.RGBA{246, 239, 229, 255}
 	warmBronze := color.RGBA{88, 60, 44, 255}
 
 	// Outer dark ink spectacle rim + gunmetal/bronze inner bevel + deep obsidian glass
-	r.aaDisc(lcx, lcy, lr+3.0*g.sc, darkInk)
-	r.aaDisc(lcx, lcy, lr+0.8*g.sc, color.RGBA{46, 40, 48, 255})
-	r.aaDisc(lcx-1.4*g.sc, lcy-1.4*g.sc, lr, warmBronze)
-	r.aaDisc(lcx, lcy, lr-2.0*g.sc, color.RGBA{12, 10, 16, 255})
+	r.aaDisc(lcx, lcy, lr+3.6*g.sc, darkInk)
+	r.aaDisc(lcx, lcy, lr+1.0*g.sc, color.RGBA{46, 40, 48, 255})
+	r.aaDisc(lcx-1.6*g.sc, lcy-1.6*g.sc, lr, warmBronze)
+	r.aaDisc(lcx, lcy, lr-2.4*g.sc, color.RGBA{12, 10, 16, 255})
 
-	pX := snap.LookX * 8.0 * g.sc
-	pY := snap.LookY * 6.0 * g.sc
+	// Gaze + micro-saccade tracking inside the optical lens barrel
+	pX := snap.LookX*10.0*g.sc + g.talkEnergy*1.8*g.sc*math.Sin(tSec*9.5)
+	pY := snap.LookY*7.5*g.sc + g.talkEnergy*1.5*g.sc*math.Cos(tSec*11.5)
 
 	switch snap.Mood {
 	case robot.MoodHappy:
 		arcR := lr * 0.58
-		r.aaRing(lcx+pX*0.4, lcy+arcR*0.25+pY*0.4, arcR, max(3.0, lr*0.18), math.Pi*1.18, math.Pi*1.82, pureWhite)
+		r.aaRing(lcx+pX*0.4, lcy+arcR*0.25+pY*0.4, arcR, max(3.4, lr*0.18), math.Pi*1.18, math.Pi*1.82, pureWhite)
 		return
 	case robot.MoodSleepy:
-		drawLensEyelid(r, lcx, lcy, lr-1.0*g.sc, 0.72, creamLid, darkInk)
+		drawLensEyelid(r, lcx, lcy, lr-1.2*g.sc, 0.72, 0.0, creamLid, darkInk)
 		return
 	}
+
+	// Voice-reactive internal camera aperture / iris ring that dilates & contracts with spoken syllables
+	syllablePulse := g.talkEnergy*(0.60+0.40*math.Sin(tSec*14.5)) + g.listenLevel*0.55
+	irisRad := lr * (0.42 + 0.14*syllablePulse)
+	irisCol := lerp(color.RGBA{34, 30, 42, 255}, color.RGBA{128, 92, 68, 255}, clamp01(syllablePulse*1.1))
+	r.aaRing(lcx+pX*0.55, lcy+pY*0.55, irisRad, max(1.8, lr*0.065), 0, 2*math.Pi, irisCol)
 
 	// Lower-left warm amber/brown internal lens reflection crescent
 	refCX := lcx - lr*0.10 + pX*0.45
 	refCY := lcy + lr*0.10 + pY*0.45
-	r.aaRing(refCX, refCY, lr*0.60, max(2.4, lr*0.15), math.Pi*0.48, math.Pi*0.92, warmBronze)
+	r.aaRing(refCX, refCY, lr*0.60, max(2.8, lr*0.15), math.Pi*0.48, math.Pi*0.92, warmBronze)
 
 	// Upper-left subtle warm dome sheen inside glass
 	drawAlphaDisc(r, lcx-lr*0.12+pX*0.55, lcy-lr*0.18+pY*0.55, lr*0.32, color.RGBA{58, 40, 32, 150})
 
-	scale := 1.0
+	scale := 1.0 + 0.14*syllablePulse
 	if snap.Mood == robot.MoodStartled {
 		scale = 1.25
 	} else if snap.Mood == robot.MoodCurious || snap.Mood == robot.MoodListening {
-		scale = 1.12
+		scale = max(scale, 1.12)
 	}
 
 	// Primary upper-right glossy white bean specular catchlight
@@ -694,31 +616,57 @@ func paintOpticalLens(r *renderer, lcx, lcy, lr, blink float64, snap robot.Snaps
 	// Secondary lower-right crisp white dot catchlight
 	dx := lcx + lr*0.35 + pX*0.85
 	dy := lcy + lr*0.24 + pY*0.85
-	r.aaDisc(dx, dy, max(2.2, lr*0.10*scale), pureWhite)
+	r.aaDisc(dx, dy, max(2.5, lr*0.10*scale), pureWhite)
 
-	if blink > 0.05 {
-		drawLensEyelid(r, lcx, lcy, lr-1.0*g.sc, blink, creamLid, darkInk)
+	if blink > 0.04 || g.lowerSmile > 0.04 {
+		drawLensEyelid(r, lcx, lcy, lr-1.2*g.sc, blink, g.lowerSmile, creamLid, darkInk)
 	}
 }
 
-func drawLensEyelid(r *renderer, cx, cy, rad, closure float64, lidCol, lashCol color.RGBA) {
-	closure = clamp01(closure)
-	lidBottomY := cy - rad + 2.0*rad*closure
+func drawLensEyelid(r *renderer, cx, cy, rad, topClosure, botSmile float64, lidCol, lashCol color.RGBA) {
+	topClosure = clamp01(topClosure)
+	botSmile = clamp01(botSmile)
+	lidBottomY := cy - rad + 2.0*rad*topClosure
+	lidTopFromBotY := cy + rad - 0.85*rad*botSmile
 	r2 := rad * rad
-	for y := int(math.Floor(cy - rad)); y <= int(math.Ceil(lidBottomY)); y++ {
-		dy := float64(y) + 0.5 - cy
-		if dy*dy >= r2 {
-			continue
+
+	if topClosure > 0.04 {
+		for y := int(math.Floor(cy - rad)); y <= int(math.Ceil(lidBottomY)); y++ {
+			dy := float64(y) + 0.5 - cy
+			if dy*dy >= r2 {
+				continue
+			}
+			halfW := math.Sqrt(r2 - dy*dy)
+			x0 := int(math.Floor(cx - halfW))
+			x1 := int(math.Ceil(cx + halfW))
+			col := lidCol
+			if float64(y) >= lidBottomY-3.2 {
+				col = lashCol
+			}
+			for x := x0; x <= x1; x++ {
+				r.blendAt(x, y, col, 1.0)
+			}
 		}
-		halfW := math.Sqrt(r2 - dy*dy)
-		x0 := int(math.Floor(cx - halfW))
-		x1 := int(math.Ceil(cx + halfW))
-		col := lidCol
-		if float64(y) >= lidBottomY-3.0 {
-			col = lashCol
-		}
-		for x := x0; x <= x1; x++ {
-			r.blendAt(x, y, col, 1.0)
+	}
+
+	if botSmile > 0.04 {
+		shutterCol := color.RGBA{26, 22, 32, 255}
+		rimCol := color.RGBA{88, 60, 44, 255}
+		for y := int(math.Floor(lidTopFromBotY)); y <= int(math.Ceil(cy+rad)); y++ {
+			dy := float64(y) + 0.5 - cy
+			if dy*dy >= r2 {
+				continue
+			}
+			halfW := math.Sqrt(r2 - dy*dy)
+			x0 := int(math.Floor(cx - halfW))
+			x1 := int(math.Ceil(cx + halfW))
+			col := shutterCol
+			if float64(y) <= lidTopFromBotY+2.4 {
+				col = rimCol
+			}
+			for x := x0; x <= x1; x++ {
+				r.blendAt(x, y, col, 1.0)
+			}
 		}
 	}
 }
