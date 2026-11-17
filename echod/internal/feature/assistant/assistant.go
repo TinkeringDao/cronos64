@@ -260,7 +260,7 @@ var allowedAfterStations = map[string]bool{"play_radio": true, "save_station": t
 // read_page goes only to a page a search found in the same turn (webTurn.check): an address the
 // web made up could carry what the turn has read (a calendar's events) out in its query.
 var allowedAfterWeb = map[string]bool{
-	"web_search": true, "read_page": true, "hindsight_recall": true,
+	"web_search": true, "read_page": true,
 	"list_timers": true, "list_alarms": true, "list_stations": true, "list_callees": true,
 	"find_radio": true, "calendar": true, "weather": true, "weather_elsewhere": true, "read_todo": true,
 }

@@ -17,8 +17,8 @@ import (
 
 func TestHindsightRecallAndAsyncRetain(t *testing.T) {
 	config.Use(filepath.Join(t.TempDir(), "state.json"))
-	netguard.AllowLoopbackForTest.Store(true)
-	defer netguard.AllowLoopbackForTest.Store(false)
+	prevLoopback := netguard.AllowLoopbackForTest.Swap(true)
+	t.Cleanup(func() { netguard.AllowLoopbackForTest.Store(prevLoopback) })
 
 	var (
 		recalledReachBank atomic.Bool
