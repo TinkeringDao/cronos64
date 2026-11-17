@@ -30,6 +30,42 @@
 
 ---
 
+## `cronos` 64-Bit (`arm64`) & Local Companion Fork Notes
+
+This repository is a hardware-focused fork of [`HuskerMinion/techo5`](https://github.com/HuskerMinion/techo5) targeting the Echo Show 5 2nd gen (`cronos`, MediaTek MT8163V/B, 4x Cortex-A53). Upstream ships a 32-bit `armv7` userland on `cronos` because the stock `4.9.337-g8d928c5176cc` kernel's proprietary MediaTek camera ISP (`kd_camera_hw`) and `ION` allocator paths use word-sized ioctl layouts. Rebuilding that kernel from source (for example to enable `CONFIG_DMA_CMA`) alters `struct device` and breaks symbol CRCs against the closed/prebuilt `mt76x8_wlan.ko` and `mt76x8_bt.ko` radio modules.
+
+This fork moves `echod` and the Alpine userland on `cronos` to 64-bit (`GOARCH=arm64` / `aarch64`) without rebuilding the kernel, and adds a local-only desk companion mode:
+
+- Native LP64 camera ISP and `ION` ioctl struct definitions (`echod/internal/hardware/camera/ioctl_layout_lp64.go`) pinned across syscalls with `runtime.Pinner`, keeping the 32-bit ILP32 layout intact for `GOARCH=arm` builds.
+- ARMv8 NEON `int8` dot-product assembly (`echod/third_party/microwakeword/interpreter/dot_int8_arm64.s`, `SMULL`/`SMLAL`/`ADDV`) for quantized `microwakeword` wake-word inference on `arm64`.
+- Appended FDT patching (`tools/linux/patch-dtb.py`, `tools/linux/unthrottle-cronos-boot.sh`) across all 11 board-revision device trees to drop unused `consys-reserve-memory` and `secure-carveout` carveouts and remove `amzn,mic-downmix` from `/soc/spi@1100a000/spi@0`, paired with `384 MiB` `lz4` ZRAM, `deadline` eMMC scheduling, and `interactive` cpufreq tuning at boot (`tools/linux/rootfs/lib/techo5-unthrottle.sh`).
+- Raw stereo 2-mic TDOA azimuth estimation (`echod/internal/hardware/mic/tdoa.go`) over unmixed `Ch0`/`Ch1` PDM samples ahead of mono downmix, while preserving hardware speaker loopback (`Ch2`/`Ch3`) for WebRTC `AEC3` barge-in.
+- Userspace `mtktscpu` thermal supervision (`echod/internal/hardware/thermal`) stepping `/proc/cpufreq/cpufreq_limited_max_freq_by_user` down at `>= 80 C` and back up below `75 C` across `FY` silicon OPPs, clamping to `1.05 GHz` if sysfs cannot be read.
+- A 60 Hz dirty-rectangle companion screen and sensor-fusion loop (`echod/internal/feature/robot`, `echod/internal/feature/display/robot_face.go`) combining 30 Hz `OV02B10` Bayer luma motion gaze, stereo TDOA azimuth, `GT9xx` touch gestures, chunk-streamed Wyoming TTS, an optional local VLM `look` snapshot tool, and a bounded `30 Hz` WebSocket pose bridge (`echod/internal/lib/actuate`, [`docs/reachy-bridge.md`](docs/reachy-bridge.md)).
+- Strict local-network egress filtering (`echod/internal/lib/netguard/localonly.go`) enforcing RFC 1918, RFC 6598, and IPv6 ULA destinations inside `net.Dialer.Control` after DNS resolution, plus an offline TWRP partition backup verifier (`tools/verify-cronos-backup.py`) gated before flashing.
+
+### Trade-offs and Hardware Quirks on `cronos`
+
+- Retail `cronos` boards carry `FY`-binned MT8163 silicon rated to `1.30 GHz`. Forcing `1.50 GHz` `SB` OPPs or poking the `sym827@60` CPU buck regulator on I2C bus 1 is intentionally avoided, and `lk` (`mmcblk0p3`) is never modified (`expdb` boot-logo writes are 4-KiB block-aligned).
+- Because the stock `4.9.337` kernel compiles out `CONFIG_CPU_THERMAL` and leaves only the `58 C` `skin_virtual` emergency shutdown, sustained wake-word + VLM workloads depend on `echod`'s userspace `mtktscpu` loop running.
+- Sliding the physical `gpio-499` camera cover closed or latching the `gpio-384` hardware mute switch immediately zeroes luma gaze confidence and makes the `look` tool return closed without waiting on frame capture timeouts.
+- Cloud speech-to-speech (`OpenAI`, `Gemini`, `xAI` in `echod/internal/feature/voice/realtime.go`) is disabled at runtime so audio and camera frames never leave the local LAN or overlay mesh, and `echod/internal/update/trust.go` pins this fork's Ed25519 public key rather than upstream's OTA channel.
+
+### Building and Testing This Fork
+
+```sh
+cd echod
+go test ./...
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o ../bin/echod-arm64 ./cmd/echod
+cd ..
+python3 -m unittest tools/linux/test_patch_dtb.py
+python3 tools/test_verify_cronos_backup.py
+```
+
+Upstream project documentation follows below.
+
+---
+
 > **New: the Echo Show 8 2nd gen (2021, `athena`) runs TECHO5 on a 64-bit mainline Linux kernel.**
 > The story, the board and the UART pads: [TECHO5 ATHENA](https://github.com/HuskerMinion/techo5-athena).
 > Install: [docs/install-athena.md](docs/install-athena.md).
@@ -781,6 +817,5 @@ Android and any app on the screen keep running, silently.
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
-
-TECHO5 isn't affiliated with Amazon. Echo and Alexa are trademarks of Amazon.com, Inc.
+Released under the [MIT License](LICENSE) (preserving upstream TECHO5 copyright alongside `TinkeringDao` fork additions); third-party attributions are in [NOTICE](NOTICE).
+Independent non-commercial hardware interoperability project; see [LEGAL.md](LEGAL.md) for trademark nominative fair use, regulatory notices, and German statutory references (`UrhG §§ 69d/69e`, `MarkenG § 23`).

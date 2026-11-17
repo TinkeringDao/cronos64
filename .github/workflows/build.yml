@@ -39,21 +39,25 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  attestations: write
 
 jobs:
   build:
     # A panel tag is the panel job's alone: it releases no Echo binary.
     if: ${{ !startsWith(github.ref_name, 'panel-') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.27'
-          cache-dependency-path: echod/go.sum
+          cache: false
 
       - name: Version info
         id: ver
@@ -99,9 +103,12 @@ jobs:
           GOARCH: arm
           GOARM: "7"
           CGO_ENABLED: "0"
+          VER_VERSION: ${{ steps.ver.outputs.version }}
+          VER_COMMIT: ${{ steps.ver.outputs.commit }}
+          VER_DATE: ${{ steps.ver.outputs.date }}
         run: |
           pkg=github.com/HuskerMinion/techo5/echod/internal/layout
-          ldflags="-s -w -X '$pkg.Version=${{ steps.ver.outputs.version }}' -X '$pkg.GitCommit=${{ steps.ver.outputs.commit }}' -X '$pkg.BuildDate=${{ steps.ver.outputs.date }}'"
+          ldflags="-s -w -X '$pkg.Version=${VER_VERSION}' -X '$pkg.GitCommit=${VER_COMMIT}' -X '$pkg.BuildDate=${VER_DATE}'"
           go build -trimpath -ldflags "$ldflags" -o ../bin/echod-arm ./cmd/echod
           go build -tags dot -trimpath -ldflags "$ldflags" -o ../bin/echod-arm-dot ./cmd/echod
           go build -tags dot,donut -trimpath -ldflags "$ldflags" -o ../bin/echod-arm-donut ./cmd/echod
@@ -113,8 +120,9 @@ jobs:
         working-directory: echod
         env:
           CGO_ENABLED: "0"
+          VER_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          ldflags="-s -w -X 'main.version=${{ steps.ver.outputs.version }}'"
+          ldflags="-s -w -X 'main.version=${VER_VERSION}'"
           for t in windows/amd64/windows-amd64.exe windows/arm64/windows-arm64.exe \
                    darwin/amd64/macos-amd64 darwin/arm64/macos-arm64 \
                    linux/amd64/linux-amd64 linux/arm64/linux-arm64; do
@@ -226,17 +234,23 @@ jobs:
   panel:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'panel-') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       # The NDK the app's docs/building.md names. The runner's SDK installs it; nothing else is fetched.
       NDK_VERSION: 28.2.13676358
       API: 26
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.27.3'
-          cache-dependency-path: echod/go.sum
+          cache: false
 
       - name: Version info
         id: ver
@@ -267,9 +281,10 @@ jobs:
         env:
           GOOS: android
           CGO_ENABLED: "1"
+          VER_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           bin="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          ldflags="-s -w -X github.com/HuskerMinion/techo5/echod/internal/layout.Version=${{ steps.ver.outputs.version }}"
+          ldflags="-s -w -X github.com/HuskerMinion/techo5/echod/internal/layout.Version=${VER_VERSION}"
           mkdir -p ../bin
           GOARCH=arm64 CC="$bin/aarch64-linux-android${API}-clang" \
             go build -tags panel -trimpath -ldflags "$ldflags" -o ../bin/libechod-arm64-v8a.so ./cmd/echod

@@ -1,0 +1,14 @@
+title = "Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Unit test fixtures and public Ed25519 release verification key"
+paths = [
+  '''^echod/.*_test\.go$''',
+]
+regexes = [
+  '''0123456789abcdefABCDEF''',
+  '''wfRC/ZGmTPYmxbVXxAP7OlfY/FCwbZVs5ho0wo89gSc=''',
+]

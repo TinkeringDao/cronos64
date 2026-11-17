@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27'
+          cache-dependency-path: echod/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test dependencies
+        run: python3 -m pip install --upgrade pip fdt==0.3.3
+
+      - name: Check Go formatting and run unit tests
+        working-directory: echod
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "ERROR: unformatted Go files"; exit 1; }
+          go test ./...
+          go test -tags dot ./...
+          go test -tags dot,donut ./...
+          go test -tags spot ./...
+          go test -tags panel ./...
+
+      - name: Run microwakeword interpreter unit tests
+        working-directory: echod/third_party/microwakeword
+        run: go test ./...
+
+      - name: Cross-compile linux/arm64 and linux/armv7 targets
+        working-directory: echod
+        run: |
+          set -euo pipefail
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+          for tags in dot dot,donut spot panel; do
+            GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags "$tags" ./...
+          done
+          for tags in "" dot dot,donut spot panel; do
+            GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -tags "$tags" ./...
+          done
+
+      - name: Run Python and rootfs unit tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest tools/linux/test_patch_dtb.py
+          python3 tools/test_fetch_inputs.py
+          python3 tools/test_install_show.py
+          python3 tools/test_verify_cronos_backup.py
+          python3 tools/locale/status.py --check
+          sh tools/linux/test_boot_unthrottle.sh
+          sh tools/linux/test_rootfs_arch.sh
