@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Security updates are applied to the latest state of the default branch of this repository (`TinkeringDao/techo5`, a [`TinkeringDao`](https://github.com/TinkeringDao) fork of TECHO5 for the Echo Show 5 2nd generation).
+Security updates are applied to the latest state of the default branch of this repository (`TinkeringDao/cronos64`, a [`TinkeringDao`](https://github.com/TinkeringDao) fork of TECHO5 for the Echo Show 5 2nd generation).
 
 | Branch / Version | Supported |
 | :--- | :--- |

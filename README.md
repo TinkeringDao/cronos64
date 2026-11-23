@@ -30,7 +30,7 @@
 
 ---
 
-## `cronos` 64-Bit (`arm64`) & Local Companion Fork Notes
+## `cronos64` — 64-Bit (`arm64`) & Local Companion Fork Notes (`TinkeringDao/cronos64`)
 
 This repository is a hardware-focused fork of [`HuskerMinion/techo5`](https://github.com/HuskerMinion/techo5) targeting the Echo Show 5 2nd gen (`cronos`, MediaTek MT8163V/B, 4x Cortex-A53). Upstream ships a 32-bit `armv7` userland on `cronos` because the stock `4.9.337-g8d928c5176cc` kernel's proprietary MediaTek camera ISP (`kd_camera_hw`) and `ION` allocator paths use word-sized ioctl layouts. Rebuilding that kernel from source (for example to enable `CONFIG_DMA_CMA`) alters `struct device` and breaks symbol CRCs against the closed/prebuilt `mt76x8_wlan.ko` and `mt76x8_bt.ko` radio modules.
 

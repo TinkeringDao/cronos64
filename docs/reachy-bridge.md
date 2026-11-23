@@ -1,11 +1,11 @@
 # Phase 2 Reachy Pose Bridge Contract
 
-This specification defines the local-network WebSocket wire contract between `TinkeringDao/techo5` (`echod/internal/lib/actuate` and `echod/internal/feature/robot`) and `TinkeringDao/reachy-companion` (built on `pollen-robotics/reachy_mini` SDK v1.13.0).
+This specification defines the local-network WebSocket wire contract between `TinkeringDao/cronos64` (`echod/internal/lib/actuate` and `echod/internal/feature/robot`) and `TinkeringDao/actlatch` (built on `pollen-robotics/reachy_mini` SDK v1.13.0).
 
 ## Scope: Phase 1 vs. Phase 2
 
 - **Phase 1 (Standalone Cronos Companion):** `echod` fuses voice turn state, stereo 2-mic TDOA azimuth, demand-gated front camera luma gaze, touch gestures, and `mtktscpu` thermal posture locally (`echod/internal/feature/robot/robot.go`), rendering the companion face on the Cronos display at 60 Hz (`echod/internal/feature/display/robot_face.go`) while wiring `Robot.actuate` to `actuate.NoopTransport{}`. No external robot hardware is required.
-- **Phase 2 (Bridged Physical Reachy):** `Robot.SetTransport(...)` (wrapping `GuardedSender.SetTransport(...)`) swaps `NoopTransport{}` for `actuate.NewWebSocketTransport("ws://<lan-host>:<port>/v1/companion/pose")`, streaming clamped pose and expression frames to `TinkeringDao/reachy-companion` over the local LAN or RFC 6598 overlay mesh.
+- **Phase 2 (Bridged Physical Reachy):** `Robot.SetTransport(...)` (wrapping `GuardedSender.SetTransport(...)`) swaps `NoopTransport{}` for `actuate.NewWebSocketTransport("ws://<lan-host>:<port>/v1/companion/pose")`, streaming clamped pose and expression frames to `TinkeringDao/actlatch` over the local LAN or RFC 6598 overlay mesh.
 - **Physical Cronos Bring-Up Gate:** Before flashing a physical Cronos unit, verify the pre-flash partition backup (`p1..p11`, `p14`, `p15`, `mmcblk0boot0`, `mmcblk0boot1`, untouched `p3` `lk`, `ANDROID!` + `Linux version 4.9.337` in `p9`, and `SHA256SUMS`) with:
 
   ```sh
@@ -87,7 +87,7 @@ Must match `robot.Mood` constants in `echod/internal/feature/robot/robot.go`:
 7. `sleepy` — panel dark / sleep state via `Robot.SetAsleep(true)` (thermal throttling sets `Snapshot.ThermalDegraded` and displays `"Thermal"` on the face top bar without changing `mood`)
 8. `startled` — rapid center double-tap reaction (`600 ms` transient)
 
-## Receiver Contract (`TinkeringDao/reachy-companion`, `reachy_mini` v1.13.0)
+## Receiver Contract (`TinkeringDao/actlatch`, `reachy_mini` v1.13.0)
 
 ### 1. Frame Validation & Sequence Guard
 

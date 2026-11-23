@@ -1,6 +1,6 @@
-# Legal, Interoperability, & Regulatory Notice (`TinkeringDao/techo5`)
+# Legal, Interoperability, & Regulatory Notice (`TinkeringDao/cronos64`)
 
-`TinkeringDao/techo5` is an independent, non-commercial fork of the MIT-licensed [TECHO5](https://github.com/HuskerMinion/techo5) project, maintained under [`TinkeringDao`](https://github.com/TinkeringDao). It follows the account-wide 8-pillar policy of `TinkeringDao`, applied to the hardware and software scope below. The upstream MIT [`LICENSE`](./LICENSE) (preserving upstream copyright attribution alongside `TinkeringDao` fork additions) and [`NOTICE`](./NOTICE) govern all upstream and derived code.
+`TinkeringDao/cronos64` is an independent, non-commercial fork of the MIT-licensed [TECHO5](https://github.com/HuskerMinion/techo5) project, maintained under [`TinkeringDao`](https://github.com/TinkeringDao). It follows the account-wide 8-pillar policy of `TinkeringDao`, applied to the hardware and software scope below. The upstream MIT [`LICENSE`](./LICENSE) (preserving upstream copyright attribution alongside `TinkeringDao` fork additions) and [`NOTICE`](./NOTICE) govern all upstream and derived code.
 
 ---
 
